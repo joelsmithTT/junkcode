@@ -16,3 +16,9 @@ target_link_libraries(iommu_test blackhole_thing)
 
 add_executable(console console.cpp)
 target_link_libraries(console blackhole_thing)
+
+add_executable(x280_bench x280_bench.cpp)
+target_link_libraries(x280_bench blackhole_thing)
+
+add_executable(prefetcher prefetcher.cpp)
+target_link_libraries(prefetcher blackhole_thing)

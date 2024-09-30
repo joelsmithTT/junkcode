@@ -4,6 +4,8 @@
 #include "blackhole_pcie.hpp"
 #include "tlb_window.hpp"
 
+#include <fmt/core.h>
+
 namespace tt {
 
 class BlackholePciDevice;
@@ -82,6 +84,67 @@ struct Tlb128G
     };
 };
 
+typedef union {
+    uint32_t value;
+    struct {
+        // Bit 0: Enable hardware prefetcher support for scalar loads
+        uint32_t scalarLoadSupportEn : 1;
+
+        // Bit 1: Reserved
+        uint32_t reserved0 : 1;
+
+        // Bits 7:2: Initial prefetch distance
+        uint32_t initialDist : 6;
+
+        // Bits 13:8: Maximum allowed prefetch distance
+        uint32_t maxAllowedDist : 6;
+
+        // Bits 19:14: Linear-to-exponential prefetch distance threshold
+        uint32_t linToExpThrd : 6;
+
+        // Bits 27:20: Reserved
+        uint32_t reserved1 : 8;
+
+        // Bit 28: Enable prefetches to cross-pages
+        uint32_t crossPageEn : 1;
+
+        // Bits 30:29: Threshold for forgiving loads with mismatching strides when L2 Prefetcher is in trained state
+        uint32_t forgiveThrd : 2;
+
+        // Bit 31: Reserved (Read-Only)
+        uint32_t reserved2 : 1;
+    } bits;
+} PrefetcherCtrl0;
+
+typedef union {
+    uint32_t value;
+    struct {
+        // Bits [3:0]: Threshold fraction/16 of MSHRs to stop sending hits
+        uint32_t qFullnessThrd : 4;
+
+        // Bits [8:4]: Threshold number of cache tag hits for evicting prefetch entry
+        uint32_t hitCacheThrd : 5;
+
+        // Bits [12:9]: Threshold number of demand hits on hint MSHRs for increasing prefetch distance
+        uint32_t hitMSHRThrd : 4;
+
+        // Bits [18:13]: Size of the comparison window for address matching
+        uint32_t window : 6;
+
+        // Bit 19: Enable hardware prefetcher support for scalar stores
+        uint32_t scalarStoreSupportEn : 1;
+
+        // Bit 20: Enable hardware prefetcher support for vector loads
+        uint32_t vectorLoadSupportEn : 1;
+
+        // Bit 21: Enable hardware prefetcher support for vector stores
+        uint32_t vectorStoreSupportEn : 1;
+
+        // Bits [31:22]: Reserved
+        uint32_t reserved : 10;
+    } bits;
+} PrefetcherCtrl1;
+
 } // namespace l2cpu
 
 /**
@@ -109,6 +172,7 @@ class L2CPU
     static constexpr uint64_t MEMORY_PORT       = 0x0000'4000'3000'0000ULL; //  64 TiB
     static constexpr uint64_t L2CPU_REGISTERS   = 0xFFFF'F7FE'FFF0'0000ULL; // 512 KiB
     static constexpr uint64_t L2CPU_DMAC        = 0xFFFF'F7FE'FFF8'0000ULL;
+    static constexpr uint64_t L2CPU_PREFETCH    = 0x02030000;
     // clang-format on
 
     BlackholePciDevice& device;
@@ -124,6 +188,19 @@ public:
         , peripheral_port(device.map_tlb_4G(our_noc0_x, our_noc0_y, PERIPHERAL_PORT)) // Ugh
     {
     }
+
+    uint32_t read32(uint64_t address)
+    {
+        auto tlb = device.map_tlb_2M_UC(our_noc0_x, our_noc0_y, address);
+        return tlb->read32(0);
+    }
+
+    void write32(uint64_t address, uint32_t value)
+    {
+        auto tlb = device.map_tlb_2M_UC(our_noc0_x, our_noc0_y, address);
+        tlb->write32(0, value);
+    }
+
 
     // TODO: would be ideal to manage tlb_index internally instead of making the
     // caller have to pick one.
@@ -170,7 +247,10 @@ public:
         tlb.address = address >> 37;
         tlb.x_end = noc_x;
         tlb.y_end = noc_y;
-        tlb.strict_order = 1;
+
+        // HACK!
+        // tlb.strict_order = 1;
+        tlb.posted = 1;
 
         mfence();
         registers->write32(tlb_config_offset + 0x0, tlb.data[0]);
@@ -190,6 +270,34 @@ public:
         auto access_address = ((1ULL << 43) | ((1ULL << 37) * (1 + tlb_index)) | SYSTEM_PORT) + local_offset;
         return access_address;
         // return ((1ULL << 43) | ((1ULL << 37) * (1 + tlb_index)) | MEMORY_PORT) + local_offset;
+    }
+
+    void configure_prefetcher(uint32_t prefetcher_ctrl0, uint32_t prefetcher_ctrl1)
+    {
+        std::vector<uint64_t> offsets = { 0x0000, 0x2000, 0x4000, 0x6000 };
+        for (auto offset : offsets) { 
+            auto addr = L2CPU_PREFETCH + offset;
+            auto val = read32(addr);
+
+            write32(addr, prefetcher_ctrl0);
+            fmt::print("Prefetcher at {:#x} configured: {:#x} -> {:#x}\n", addr, val, prefetcher_ctrl0);
+
+            addr += 0x4;
+            val = read32(addr);
+            write32(addr, prefetcher_ctrl1);
+
+            fmt::print("Prefetcher at {:#x} configured: {:#x} -> {:#x}\n", addr, val, prefetcher_ctrl1);
+        }
+    }
+
+    void configure_prefetcher_default()
+    {
+        configure_prefetcher(0x14a0c, 0xc45e);
+    }
+
+    void configure_prefetcher_recommended()
+    {
+        configure_prefetcher(0x15811, 0x38c84e);
     }
 };
 
