@@ -1,0 +1,3 @@
+[submodule "blackhole-thing/third_party/fmt"]
+	path = blackhole-thing/third_party/fmt
+	url = https://github.com/fmtlib/fmt.git
