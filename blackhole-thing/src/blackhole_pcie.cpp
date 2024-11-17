@@ -195,6 +195,7 @@ public:
     virtual void write_block(uint64_t address, const void* buffer, size_t size) override
     {
         if (address + size > window_size) {
+            fmt::print("address: {:#x}, size: {:#x}, window_size: {:#x}\n", address, size, window_size);
             throw std::out_of_range("Out of bounds access");
         }
 

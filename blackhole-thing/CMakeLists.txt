@@ -22,3 +22,9 @@ target_link_libraries(x280_bench blackhole_thing)
 
 add_executable(prefetcher prefetcher.cpp)
 target_link_libraries(prefetcher blackhole_thing)
+
+add_executable(fivetwelve fivetwelve.cpp)
+target_link_libraries(fivetwelve blackhole_thing)
+
+add_executable(mmio_bench mmio_bench.cpp)
+target_link_libraries(mmio_bench blackhole_thing)
