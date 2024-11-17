@@ -167,7 +167,7 @@ class L2CPU
     // clang-format off
     static constexpr uint64_t PERIPHERAL_PORT   = 0x0000'0000'2000'0000ULL; // 256 MiB
     static constexpr uint64_t L3_ZERO_START     = 0x0000'0000'0A00'0000ULL; //   2 MiB
-    static constexpr uint64_t L3_ZERO_END       = 0x0000'0000'0A20'0000ULL; //   
+    static constexpr uint64_t L3_ZERO_END       = 0x0000'0000'0A20'0000ULL; //
     static constexpr uint64_t SYSTEM_PORT       = 0x0000'0000'3000'0000ULL; //  64 TiB
     static constexpr uint64_t MEMORY_PORT       = 0x0000'4000'3000'0000ULL; //  64 TiB
     static constexpr uint64_t L2CPU_REGISTERS   = 0xFFFF'F7FE'FFF0'0000ULL; // 512 KiB
@@ -185,7 +185,7 @@ public:
         : device(device)
         , our_noc0_x(noc0_x)
         , our_noc0_y(noc0_y)
-        , peripheral_port(device.map_tlb_4G(our_noc0_x, our_noc0_y, PERIPHERAL_PORT)) // Ugh
+        // , peripheral_port(device.map_tlb_4G(our_noc0_x, our_noc0_y, PERIPHERAL_PORT)) // Ugh
     {
     }
 
@@ -233,6 +233,37 @@ public:
         return access_address;
     }
 
+    void print_noc_tlb_2M(size_t tlb_index)
+    {
+        auto registers = device.map_tlb_2M_UC(our_noc0_x, our_noc0_y, L2CPU_REGISTERS);
+        size_t tlb_config_offset = tlb_index * 0x10;
+
+        l2cpu::Tlb2M tlb{};
+        tlb.data[0] = registers->read32(tlb_config_offset + 0x0);
+        tlb.data[1] = registers->read32(tlb_config_offset + 0x4);
+        tlb.data[2] = registers->read32(tlb_config_offset + 0x8);
+        tlb.data[3] = registers->read32(tlb_config_offset + 0xC);
+        uint64_t address = tlb.address << 21;
+        uint64_t x = tlb.x_end;
+        uint64_t y = tlb.y_end;
+        fmt::print("{} addr: {:#x}, x: {}, y: {}\n", tlb_index, address, x, y);
+    }
+
+    void print_noc_tlb_128G(size_t tlb_index)
+    {
+        auto registers = device.map_tlb_2M_UC(our_noc0_x, our_noc0_y, L2CPU_REGISTERS);
+        size_t tlb_config_offset = 0xE00 + (tlb_index * 0xC);
+
+        l2cpu::Tlb128G tlb{};
+        tlb.data[0] = registers->read32(tlb_config_offset + 0x0);
+        tlb.data[1] = registers->read32(tlb_config_offset + 0x4);
+        tlb.data[2] = registers->read32(tlb_config_offset + 0x8);
+        uint64_t address = (size_t)tlb.address << 37ULL;
+        uint64_t x = tlb.x_end;
+        uint64_t y = tlb.y_end;
+        fmt::print("{} addr: {:#x}, x: {}, y: {}\n", tlb_index, address, x, y);
+    }
+
     uint64_t configure_noc_tlb_128G(size_t tlb_index, uint32_t noc_x, uint32_t noc_y, uint64_t address)
     {
         auto registers = device.map_tlb_2M_UC(our_noc0_x, our_noc0_y, L2CPU_REGISTERS);
@@ -275,7 +306,7 @@ public:
     void configure_prefetcher(uint32_t prefetcher_ctrl0, uint32_t prefetcher_ctrl1)
     {
         std::vector<uint64_t> offsets = { 0x0000, 0x2000, 0x4000, 0x6000 };
-        for (auto offset : offsets) { 
+        for (auto offset : offsets) {
             auto addr = L2CPU_PREFETCH + offset;
             auto val = read32(addr);
 

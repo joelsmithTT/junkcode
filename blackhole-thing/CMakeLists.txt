@@ -28,3 +28,6 @@ target_link_libraries(fivetwelve blackhole_thing)
 
 add_executable(mmio_bench mmio_bench.cpp)
 target_link_libraries(mmio_bench blackhole_thing)
+
+add_executable(x280_futz x280_futz.cpp)
+target_link_libraries(x280_futz blackhole_thing)
