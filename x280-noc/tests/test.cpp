@@ -489,6 +489,16 @@ void stress_test()
 
         // std::cout << "2M 10-6" << std::endl;
         test_8(windows_2M, TENSIX_LOCATIONS, 1<<20, n);
+
+        windows_2M.pop_back();
+        if (windows_2M.empty()) {
+            windows_2M = slurp_all_the_2M_tlbs(driver);
+        }
+        windows_128G.pop_back();
+        if (windows_128G.empty()) {
+            windows_128G = slurp_all_the_128G_tlbs(driver);
+        }
+
         // std::cout << "2M DRAM" << std::endl;
         test_8(windows_2M, DRAM_LOCATIONS, (1<<21)-1, n);
 
@@ -602,6 +612,3 @@ int main()
 }
 
 
-// TODO:
-// 1. Test that we can't map outside of the window
-// 2. Test that we can't map a window we don't own
