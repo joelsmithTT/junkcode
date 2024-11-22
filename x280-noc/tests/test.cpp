@@ -167,6 +167,7 @@ public:
     }
 
     size_t size() const { return window_size; }
+    uint8_t* data() const { return base; }
     void write8(uint64_t address, uint8_t value) { write<uint8_t>(address, value); }
     void write16(uint64_t address, uint16_t value) { write<uint16_t>(address, value); }
     void write32(uint64_t address, uint32_t value) { write<uint32_t>(address, value); }
@@ -489,6 +490,16 @@ void stress_test()
 
         // std::cout << "2M 10-6" << std::endl;
         test_8(windows_2M, TENSIX_LOCATIONS, 1<<20, n);
+
+        windows_2M.pop_back();
+        if (windows_2M.empty()) {
+            windows_2M = slurp_all_the_2M_tlbs(driver);
+        }
+        windows_128G.pop_back();
+        if (windows_128G.empty()) {
+            windows_128G = slurp_all_the_128G_tlbs(driver);
+        }
+
         // std::cout << "2M DRAM" << std::endl;
         test_8(windows_2M, DRAM_LOCATIONS, (1<<21)-1, n);
 
@@ -579,7 +590,7 @@ void test_bogus_mappings_128G()
     close(fd);
 }
 
-int main()
+int old_main()
 {
     std::cout << "test_bogus_mappings_2M" << std::endl;
     test_bogus_mappings_2M();
@@ -602,6 +613,87 @@ int main()
 }
 
 
-// TODO:
-// 1. Test that we can't map outside of the window
-// 2. Test that we can't map a window we don't own
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <stdint.h>
+#include <time.h>
+
+#define ARRAY_SIZE (16 * 1024 * 1024) // 1MB array
+#define NUM_ITERATIONS 1000000
+
+void init_random_permutation(uint64_t* array, size_t size) {
+    // First, create a sequential array
+    for (size_t i = 0; i < size; i++) {
+        array[i] = i;
+    }
+
+    // Fisher-Yates shuffle
+    for (size_t i = size - 1; i > 0; i--) {
+        size_t j = rand() % (i + 1);
+        uint64_t temp = array[i];
+        array[i] = array[j];
+        array[j] = temp;
+    }
+
+    // Convert indices to pointers
+    for (size_t i = 0; i < size; i++) {
+        array[i] = (uint64_t)&array[array[i]];
+    }
+}
+
+double measure_latency(uint64_t* array) {
+    struct timespec start, end;
+    volatile uint64_t* p = (volatile uint64_t*)array;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    // Pointer chasing loop
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        p = (volatile uint64_t*)*p;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    // Prevent compiler optimization
+    if (p == NULL) {
+        printf("This should never print\n");
+    }
+
+    double elapsed_ns = (end.tv_sec - start.tv_sec) * 1e9 +
+                       (end.tv_nsec - start.tv_nsec);
+    return elapsed_ns / NUM_ITERATIONS;
+}
+
+int main() {
+    uint64_t* array = (uint64_t*)malloc(ARRAY_SIZE * sizeof(uint64_t));
+    srand(time(NULL));
+    init_random_permutation(array, ARRAY_SIZE);
+
+    double ns = measure_latency(array);
+    printf("DRAM: Average memory latency: %.2f nanoseconds\n", ns);
+    free(array);
+
+    Driver d;
+    auto window = d.map_128G(0, 0, 0);
+
+    array = (uint64_t*)window->data();
+    srand(time(NULL));
+    init_random_permutation(array, ARRAY_SIZE);
+
+    ns = measure_latency(array);
+    printf("DRAM: Average memory latency: %.2f nanoseconds\n", ns);
+
+    window = d.map_128G(9, 11, 0);
+
+    array = (uint64_t*)window->data();
+    srand(time(NULL));
+    init_random_permutation(array, ARRAY_SIZE);
+
+    ns = measure_latency(array);
+    printf("DRAM: Average memory latency: %.2f nanoseconds\n", ns);
+
+
+
+    return 0;
+}

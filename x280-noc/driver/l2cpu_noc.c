@@ -47,7 +47,8 @@
 #define WINDOW_128G_COUNT 32
 #define WINDOW_128G_SHIFT 37
 #define WINDOW_128G_SIZE (1UL << WINDOW_128G_SHIFT)
-#define WINDOW_128G_BASE (((1UL << 43) | (1UL << 37) | SYSTEM_PORT))
+//#define WINDOW_128G_BASE (((1UL << 43) | (1UL << 37) | SYSTEM_PORT))
+#define WINDOW_128G_BASE 0x480430000000ULL
 #define WINDOW_128G_ADDR(n) (WINDOW_128G_BASE + (WINDOW_128G_SIZE * (n)))
 
 // TLB registers control NOC window configuration.
