@@ -1,23 +1,30 @@
 #include "uapi.hpp"
 #include <iostream>
 
+#include <array>
+#include <utility>
+
+
+
+#include <queue>
+#include <memory>
+#include <mutex>
+
+
 int main()
 {
-    Blackhole device;
-    for (const auto& tensix : Blackhole::TENSIX_LOCATIONS) {
-        if (tensix.x == 1) continue;
-        std::cout << "Reserving window for tensix at " << tensix.x << ", " << tensix.y << std::endl;
-        device.reserve_window(tensix.x, tensix.y);
-    }
+    NOC noc;
+    std::vector<ManagedNocWindow> windows;
+
 
     for (const auto& tensix : Blackhole::TENSIX_LOCATIONS) {
         uint32_t value = 0xbeef;
-        device.write(tensix.x, tensix.y, 0x1000, &value, sizeof(value));
+        noc.write(tensix.x, tensix.y, 0x1000, &value, sizeof(value));
     }
 
     for (const auto& tensix : Blackhole::TENSIX_LOCATIONS) {
         uint32_t value = 0;
-        device.read(tensix.x, tensix.y, 0x1000, &value, sizeof(value));
+        noc.read(tensix.x, tensix.y, 0x1000, &value, sizeof(value));
         if (value != 0xbeef) {
             std::cerr << "Failed to read back value from tensix at " << tensix.x << ", " << tensix.y << std::endl;
             return 1;
