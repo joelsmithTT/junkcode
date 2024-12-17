@@ -341,7 +341,7 @@ uint64_t BlackholePciDevice::map_for_dma(const void* buffer, size_t size)
     pin.in.output_size_bytes = sizeof(pin.out);
     pin.in.virtual_address = reinterpret_cast<uint64_t>(buffer);
     pin.in.size = size;
-    pin.in.flags = TENSTORRENT_PIN_PAGES_INTO_IOMMU;
+    // pin.in.flags = TENSTORRENT_PIN_PAGES_INTO_IOMMU;
 
     // If this is failing on you, check that the buffer is page-aligned and
     // that the size is a multiple of the page size.  Also that IOMMU is on.
@@ -370,6 +370,7 @@ void BlackholePciDevice::write_tlb_config_2M(size_t tlb_index, const pcie::Tlb2M
     dst[0] = tlb_config.data[0];
     dst[1] = tlb_config.data[1];
     dst[2] = tlb_config.data[2];
+
     mfence();
 }
 

@@ -31,3 +31,6 @@ target_link_libraries(mmio_bench blackhole_thing)
 
 add_executable(x280_futz x280_futz.cpp)
 target_link_libraries(x280_futz blackhole_thing)
+
+add_executable(tensix_reset tensix_reset.cpp)
+target_link_libraries(tensix_reset blackhole_thing)

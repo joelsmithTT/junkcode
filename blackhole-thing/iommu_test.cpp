@@ -42,8 +42,25 @@ static bool is_iommu_enabled(const PciDeviceInfo& pci_info)
     return false;
 }
 
+int test2()
+{
+    BlackholePciDevice device("/dev/tenstorrent/0");
+    size_t ONE_GIG = 1 << 30;
+    void *buffer = std::aligned_alloc(0x1000, 48*ONE_GIG);
+    uint64_t iova = device.map_for_dma(buffer, 48*ONE_GIG);
+    std::cout << "0x" << std::hex << iova << std::dec << std::endl;
+    auto window = device.map_tlb_2M_UC(11, 0, iova);
+
+    *reinterpret_cast<uint32_t*>(buffer) = 0xdeadbeef;
+
+    std::cout << "0x" << std::hex << window->read32(0) << std::endl;
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
+    return test2();
+
     // Instantiate a Blackhole
     BlackholePciDevice device("/dev/tenstorrent/0");
 
