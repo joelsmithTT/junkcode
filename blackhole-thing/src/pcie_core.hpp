@@ -2,6 +2,7 @@
 
 #include "blackhole_pcie.hpp"
 #include "tlb_window.hpp"
+#include <iostream>
 
 namespace tt {
 
@@ -93,6 +94,25 @@ public:
         registers->write32(config_address, *reinterpret_cast<const uint32_t*>(&data));
 
         return access_address;
+    }
+
+    void dump_noc_tlb_data(size_t index)
+    {
+        const uint64_t config_address = 0x134 + (4 * index);
+        const uint64_t access_address = index << 58;
+        auto registers = device.map_tlb_2M_UC(our_noc0_x, our_noc0_y, SII_A);
+        uint32_t data = registers->read32(config_address);
+        NocTlbData* tlb_data = reinterpret_cast<NocTlbData*>(&data);
+        std::cout << "tlp_type: " << tlb_data->tlp_type << "\n";
+        std::cout << "ser_np: " << tlb_data->ser_np << "\n";
+        std::cout << "ep: " << tlb_data->ep << "\n";
+        std::cout << "ns: " << tlb_data->ns << "\n";
+        std::cout << "ro: " << tlb_data->ro << "\n";
+        std::cout << "tc: " << tlb_data->tc << "\n";
+        std::cout << "msg: " << tlb_data->msg << "\n";
+        std::cout << "dbi: " << tlb_data->dbi << "\n";
+        std::cout << "atu_bypass: " << tlb_data->atu_bypass << "\n";
+        std::cout << "addr: " << tlb_data->addr << "\n";
     }
 
     void configure_inbound_iatu(size_t region, uint64_t base, uint64_t target, uint32_t limit)
