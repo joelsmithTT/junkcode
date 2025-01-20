@@ -47,8 +47,8 @@
 #define WINDOW_128G_COUNT 32
 #define WINDOW_128G_SHIFT 37
 #define WINDOW_128G_SIZE (1UL << WINDOW_128G_SHIFT)
-//#define WINDOW_128G_BASE (((1UL << 43) | (1UL << 37) | SYSTEM_PORT))
-#define WINDOW_128G_BASE 0x480430000000ULL
+#define WINDOW_128G_BASE (((1UL << 43) | (1UL << 37) | SYSTEM_PORT))
+// #define WINDOW_128G_BASE 0x480430000000ULL
 #define WINDOW_128G_ADDR(n) (WINDOW_128G_BASE + (WINDOW_128G_SIZE * (n)))
 
 // TLB registers control NOC window configuration.
@@ -106,6 +106,9 @@ struct l2cpu_noc_fd {
 	struct l2cpu_noc_dev *noc;
 	DECLARE_BITMAP(owned_2M, WINDOW_2M_COUNT);
 	DECLARE_BITMAP(owned_128G, WINDOW_128G_COUNT);
+
+	atomic_t mapped_2M_count[WINDOW_2M_COUNT];
+	atomic_t mapped_128G_count[WINDOW_128G_COUNT];
 };
 
 /**
@@ -367,9 +370,8 @@ static int allocate_2M_window(struct l2cpu_noc_dev *noc)
 	bitmap_or(in_use, noc->reserved_2M, noc->allocated_2M, WINDOW_2M_COUNT);
 
 	window_id = find_first_zero_bit(in_use, WINDOW_2M_COUNT);
-	if (window_id >= WINDOW_2M_COUNT) {
+	if (window_id >= WINDOW_2M_COUNT)
 		return -ENOSPC;
-	}
 
 	set_bit(window_id, noc->allocated_2M);
 
@@ -388,9 +390,8 @@ static int allocate_128G_window(struct l2cpu_noc_dev *noc)
 	bitmap_or(in_use, noc->reserved_128G, noc->allocated_128G, WINDOW_128G_COUNT);
 
 	window_id = find_first_zero_bit(in_use, WINDOW_128G_COUNT);
-	if (window_id >= WINDOW_128G_COUNT) {
+	if (window_id >= WINDOW_128G_COUNT)
 		return -ENOSPC;
-	}
 
 	set_bit(window_id, noc->allocated_128G);
 
@@ -573,8 +574,14 @@ static long ioctl_dealloc_2M(struct l2cpu_noc_fd *fd, unsigned long arg)
 	if (copy_from_user(&handle, (void __user *)arg, sizeof(handle)))
 		return -EFAULT;
 
+	if (handle.window_id < 0 || handle.window_id >= WINDOW_2M_COUNT)
+		return -EINVAL;
+
 	if (!test_bit(handle.window_id, fd->owned_2M))
 		return -EPERM;
+
+	if (atomic_read(&fd->mapped_2M_count[handle.window_id]) > 0)
+		return -EBUSY;
 
 	clear_bit(handle.window_id, fd->owned_2M);
 
@@ -592,8 +599,14 @@ static long ioctl_dealloc_128G(struct l2cpu_noc_fd *fd, unsigned long arg)
 	if (copy_from_user(&handle, (void __user *)arg, sizeof(handle)))
 		return -EFAULT;
 
+	if (handle.window_id < 0 || handle.window_id >= WINDOW_128G_COUNT)
+		return -EINVAL;
+
 	if (!test_bit(handle.window_id, fd->owned_128G))
 		return -EPERM;
+
+	if (atomic_read(&fd->mapped_128G_count[handle.window_id]) > 0)
+		return -EBUSY;
 
 	clear_bit(handle.window_id, fd->owned_128G);
 
@@ -659,6 +672,50 @@ static long l2cpu_cdev_ioctl(struct file *file, unsigned int cmd, unsigned long 
 	return ret;
 }
 
+static void l2cpu_vma_close(struct vm_area_struct *vma) {
+	struct l2cpu_noc_fd *fd;
+	unsigned long offset;
+	bool is_2M;
+	int window_id;
+
+	if (!vma->vm_file)
+		return;
+
+	fd = vma->vm_file->private_data;
+	if (!fd)
+		return;
+
+	offset = vma->vm_pgoff << PAGE_SHIFT;
+	is_2M = offset < WINDOW_128G_BASE;
+
+	mutex_lock(&fd->noc->lock);
+
+	if (is_2M) {
+		window_id = (offset - WINDOW_2M_BASE) >> WINDOW_2M_SHIFT;
+		if (window_id < 0 || window_id >= WINDOW_2M_COUNT)
+			goto out_unlock;
+
+		if (atomic_dec_if_positive(&fd->mapped_2M_count[window_id]) < 0) {
+			// Something is very wrong, this should never happen.
+			dev_warn(fd->noc->dev, "Window 2M %d refcount underflow\n", window_id);
+		}
+	} else {
+		window_id = (offset - WINDOW_128G_BASE) >> WINDOW_128G_SHIFT;
+		if (window_id < 0 || window_id >= WINDOW_128G_COUNT)
+			goto out_unlock;
+
+		if (atomic_dec_if_positive(&fd->mapped_128G_count[window_id]) < 0)
+			dev_warn(fd->noc->dev, "Window 128G %d refcount underflow\n", window_id);
+	}
+
+out_unlock:
+	mutex_unlock(&fd->noc->lock);
+}
+
+static const struct vm_operations_struct l2cpu_vm_ops = {
+	.close = l2cpu_vma_close,
+};
+
 /**
  * l2cpu_cdev_mmap - Memory map a NOC window
  */
@@ -705,14 +762,33 @@ static int l2cpu_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 	// CPU TLB entries for the NOC windows.
 
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+	vma->vm_ops = &l2cpu_vm_ops;
 	ret = io_remap_pfn_range(vma, vma->vm_start, offset >> PAGE_SHIFT, size, vma->vm_page_prot);
 	if (ret)
 		ret = -EAGAIN;
+
+	if (is_2M) {
+		if (atomic_inc_return(&fd->mapped_2M_count[window_id]) < 0) {
+			// Something is very wrong, this should never happen.
+			atomic_dec(&fd->mapped_2M_count[window_id]);
+			ret = -EOVERFLOW;
+			dev_warn(fd->noc->dev, "Window 2M %d refcount overflow\n", window_id);
+			goto out_unlock;
+		}
+	} else {
+		if (atomic_inc_return(&fd->mapped_128G_count[window_id]) < 0) {
+			atomic_dec(&fd->mapped_128G_count[window_id]);
+			ret = -EOVERFLOW;
+			dev_warn(fd->noc->dev, "Window 128G %d refcount overflow\n", window_id);
+			goto out_unlock;
+		}
+	}
 
 out_unlock:
 	mutex_unlock(&fd->noc->lock);
 	return ret;
 }
+
 
 static const struct file_operations chardev_fops = {
 	.owner = THIS_MODULE,
