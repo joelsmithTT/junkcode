@@ -271,16 +271,21 @@ public:
 
 void test_basic_window_ops()
 {
+    std::cout << "test_basic_window_ops" << std::endl;
+
     Driver driver;
 
     // Test single window allocation and access
     auto window = driver.map_2M(0, 0, 0);
     window->write32(0, 0xdeadbeef);
     assert(window->read32(0) == 0xdeadbeef);
+    std::cout << "/test_basic_window_ops" << std::endl;
 }
 
 void test_many_windows()
 {
+    std::cout << "test_many_windows" << std::endl;
+
     Driver driver;
     std::vector<std::unique_ptr<NocWindow>> windows;
 
@@ -297,6 +302,7 @@ void test_many_windows()
 
 void test_tensix()
 {
+    std::cout << "test_tensix" << std::endl;
     Driver driver;
     const size_t ITERATIONS = 250;
 
@@ -337,6 +343,7 @@ void test_tensix()
 
 void test_dram()
 {
+    std::cout << "test_dram" << std::endl;
     Driver driver;
     Xoroshiro128Plus rng(0x17);
     std::vector<std::unique_ptr<NocWindow>> windows;
@@ -403,6 +410,8 @@ uintptr_t random_address(uintptr_t lo, uintptr_t hi) {
 
 void test_closing_fd_before_unmap()
 {
+    std::cout << "test_closing_fd_before_unmap" << std::endl;
+
     int fd = open("/dev/l2cpu-noc", O_RDWR);
     if (fd < 0) {
         throw std::runtime_error("Couldn't open device");
@@ -433,7 +442,8 @@ void test_closing_fd_before_unmap()
         throw std::runtime_error("mmap failed");
     }
 
-    close(fd);
+    int r = close(fd);
+    std::cout << "close() returned " << r << std::endl;
 
     uint32_t* base1 = static_cast<uint32_t*>(mapping1);
     uint32_t* base2 = static_cast<uint32_t*>(mapping2);
@@ -445,6 +455,52 @@ void test_closing_fd_before_unmap()
 
     munmap(mapping1, handle.mmap_size);
     munmap(mapping2, handle.mmap_size);
+}
+
+void test_deallocating_before_unmap()
+{
+    std::cout << "test_deallocating_before_unmap" << std::endl;
+
+    int fd = open("/dev/l2cpu-noc", O_RDWR);
+    if (fd < 0) {
+        throw std::runtime_error("Couldn't open device");
+    }
+
+    struct noc_window_handle handle = { 0 };
+    if (ioctl(fd, L2CPU_IOCTL_ALLOC_2M, &handle) < 0) {
+        throw std::runtime_error("Failed to allocate window");
+    }
+
+    struct noc_window_config config = {
+        .window_id = handle.window_id,
+        .addr = 1 << 21,
+        .x_end = 9,
+        .y_end = 6,
+    };
+
+    void* mapping1 = mmap(nullptr, handle.mmap_size, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, fd, handle.mmap_offset);
+
+    void* mapping2 = mmap(nullptr, handle.mmap_size, PROT_READ | PROT_WRITE,
+                      MAP_SHARED, fd, handle.mmap_offset);
+
+    if (mapping1 == MAP_FAILED) {
+        throw std::runtime_error("mmap failed");
+    }
+    if (mapping2 == MAP_FAILED) {
+        throw std::runtime_error("mmap failed");
+    }
+
+    int r = ioctl(fd, L2CPU_IOCTL_DEALLOC_2M, &handle);
+    std::cout << "ioctl() returned " << r << std::endl;
+
+    munmap(mapping1, handle.mmap_size);
+    r = ioctl(fd, L2CPU_IOCTL_DEALLOC_2M, &handle);
+    std::cout << "ioctl() returned " << r << std::endl;
+
+    munmap(mapping2, handle.mmap_size);
+    r = ioctl(fd, L2CPU_IOCTL_DEALLOC_2M, &handle);
+    std::cout << "ioctl() returned " << r << std::endl;
 }
 
 void test_8(std::vector<std::unique_ptr<NocWindow>>& windows, const std::vector<point_t>& locations, size_t upper, size_t n) {
@@ -480,6 +536,8 @@ void test_8(std::vector<std::unique_ptr<NocWindow>>& windows, const std::vector<
 
 void stress_test()
 {
+    std::cout << "stress_test" << std::endl;
+
     Driver driver;
     auto windows_2M = slurp_all_the_2M_tlbs(driver);
     auto windows_128G = slurp_all_the_128G_tlbs(driver);
@@ -515,6 +573,8 @@ void stress_test()
 
 void test_bogus_mappings_2M()
 {
+    std::cout << "test_bogus_mappings_2M" << std::endl;
+
     int fd = open("/dev/l2cpu-noc", O_RDWR);
     if (fd < 0) {
         throw std::runtime_error("Couldn't open device");
@@ -554,6 +614,8 @@ void test_bogus_mappings_2M()
 
 void test_bogus_mappings_128G()
 {
+    std::cout << "test_bogus_mappings_128G" << std::endl;
+
     int fd = open("/dev/l2cpu-noc", O_RDWR);
     if (fd < 0) {
         throw std::runtime_error("Couldn't open device");
@@ -590,110 +652,20 @@ void test_bogus_mappings_128G()
     close(fd);
 }
 
-int old_main()
+
+
+int main()
 {
-    std::cout << "test_bogus_mappings_2M" << std::endl;
     test_bogus_mappings_2M();
-    std::cout << "test_bogus_mappings_128G" << std::endl;
     test_bogus_mappings_128G();
-    std::cout << "test_basic_window_ops" << std::endl;
     test_basic_window_ops();
-    std::cout << "test_many_windows" << std::endl;
     test_many_windows();
-    std::cout << "test_tensix" << std::endl;
     test_tensix();
-    std::cout << "test_dram" << std::endl;
     test_dram();
-    std::cout << "test_closing_fd_before_unmap" << std::endl;
     test_closing_fd_before_unmap();
-    std::cout << "stress_test" << std::endl;
-    stress_test();
+    test_deallocating_before_unmap();
+    // stress_test();
 
     return 0;
 }
 
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include <stdint.h>
-#include <time.h>
-
-#define ARRAY_SIZE (16 * 1024 * 1024) // 1MB array
-#define NUM_ITERATIONS 1000000
-
-void init_random_permutation(uint64_t* array, size_t size) {
-    // First, create a sequential array
-    for (size_t i = 0; i < size; i++) {
-        array[i] = i;
-    }
-
-    // Fisher-Yates shuffle
-    for (size_t i = size - 1; i > 0; i--) {
-        size_t j = rand() % (i + 1);
-        uint64_t temp = array[i];
-        array[i] = array[j];
-        array[j] = temp;
-    }
-
-    // Convert indices to pointers
-    for (size_t i = 0; i < size; i++) {
-        array[i] = (uint64_t)&array[array[i]];
-    }
-}
-
-double measure_latency(uint64_t* array) {
-    struct timespec start, end;
-    volatile uint64_t* p = (volatile uint64_t*)array;
-
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
-    // Pointer chasing loop
-    for (int i = 0; i < NUM_ITERATIONS; i++) {
-        p = (volatile uint64_t*)*p;
-    }
-
-    clock_gettime(CLOCK_MONOTONIC, &end);
-
-    // Prevent compiler optimization
-    if (p == NULL) {
-        printf("This should never print\n");
-    }
-
-    double elapsed_ns = (end.tv_sec - start.tv_sec) * 1e9 +
-                       (end.tv_nsec - start.tv_nsec);
-    return elapsed_ns / NUM_ITERATIONS;
-}
-
-int main() {
-    uint64_t* array = (uint64_t*)malloc(ARRAY_SIZE * sizeof(uint64_t));
-    srand(time(NULL));
-    init_random_permutation(array, ARRAY_SIZE);
-
-    double ns = measure_latency(array);
-    printf("DRAM: Average memory latency: %.2f nanoseconds\n", ns);
-    free(array);
-
-    Driver d;
-    auto window = d.map_128G(0, 0, 0);
-
-    array = (uint64_t*)window->data();
-    srand(time(NULL));
-    init_random_permutation(array, ARRAY_SIZE);
-
-    ns = measure_latency(array);
-    printf("DRAM: Average memory latency: %.2f nanoseconds\n", ns);
-
-    window = d.map_128G(9, 11, 0);
-
-    array = (uint64_t*)window->data();
-    srand(time(NULL));
-    init_random_permutation(array, ARRAY_SIZE);
-
-    ns = measure_latency(array);
-    printf("DRAM: Average memory latency: %.2f nanoseconds\n", ns);
-
-
-
-    return 0;
-}
