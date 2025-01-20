@@ -36,19 +36,18 @@
 
 // System port is a 64 TiB region that is not cached.
 // All NOC windows are mapped within this region.
-#define SYSTEM_PORT 0x30000000ULL
+#define SYSTEM_PORT 0x30000000UL
 
 // Sizes, addresses, quantities of the NOC windows.
 #define WINDOW_2M_COUNT 224
 #define WINDOW_2M_SHIFT 21
 #define WINDOW_2M_SIZE (1 << WINDOW_2M_SHIFT)
-#define WINDOW_2M_BASE (((1UL << 37) | SYSTEM_PORT))
+#define WINDOW_2M_BASE (SYSTEM_PORT + 0x400000000UL)
 #define WINDOW_2M_ADDR(n) (WINDOW_2M_BASE + (WINDOW_2M_SIZE * n))
 #define WINDOW_128G_COUNT 32
 #define WINDOW_128G_SHIFT 37
 #define WINDOW_128G_SIZE (1UL << WINDOW_128G_SHIFT)
-#define WINDOW_128G_BASE (((1UL << 43) | (1UL << 37) | SYSTEM_PORT))
-// #define WINDOW_128G_BASE 0x480430000000ULL
+#define WINDOW_128G_BASE (SYSTEM_PORT + 0x80400000000)
 #define WINDOW_128G_ADDR(n) (WINDOW_128G_BASE + (WINDOW_128G_SIZE * (n)))
 
 // TLB registers control NOC window configuration.
