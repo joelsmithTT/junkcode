@@ -37,3 +37,7 @@ target_link_libraries(tensix_reset blackhole_thing)
 
 add_executable(memory_for_x280 memory_for_x280.cpp)
 target_link_libraries(memory_for_x280 blackhole_thing)
+
+add_executable(x280-net x280-net.cpp)
+target_link_libraries(x280-net blackhole_thing)
+

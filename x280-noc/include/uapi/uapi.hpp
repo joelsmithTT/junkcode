@@ -8,18 +8,15 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
-#include "ioctl.h"
-
 #include <array>
 #include <cassert>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <mutex>
-#include <queue>
 #include <stdexcept>
+#include <cstring>
 
+#include "ioctl.h"
 
 constexpr size_t FOUR_GIGS = 1ULL << 32;
 constexpr size_t TWO_MEGS = 1ULL << 21;
@@ -31,13 +28,12 @@ class NocWindow
     int fd;
     Kind kind;
     noc_window_handle handle{};
+    noc_window_config config{};
     size_t mapped_size;
-    size_t usable_size;
-    uint64_t offset;
     uint8_t* window{nullptr};
 
 public:
-    NocWindow(int fd, uint64_t size, noc_window_config config)
+    NocWindow(int fd, uint64_t size, noc_window_config initial_config)
         : fd(fd)
         , kind(size <= (1ULL << 21) ? Kind::Size2M : Kind::Size128G)
     {
@@ -50,8 +46,8 @@ public:
             throw std::runtime_error("Size too large for window");
         }
 
-        config.window_id = handle.window_id;
-        if (ioctl(fd, ioctl_config[kind], &config) < 0) {
+        initial_config.window_id = handle.window_id;
+        if (ioctl(fd, ioctl_config[kind], &initial_config) < 0) {
             ioctl(fd, ioctl_dealloc[kind], &handle);
             throw std::runtime_error("Couldn't configure window");
         }
@@ -64,14 +60,22 @@ public:
 
         mapped_size = size;
         window = static_cast<uint8_t*>(mem);
+        config = initial_config;
     }
 
-    void reconfigure(noc_window_config config)
+    void reconfigure(noc_window_config new_config)
     {
-        config.window_id = handle.window_id;
-        if (ioctl(fd, ioctl_config[kind], &config) < 0) {
+        new_config.window_id = handle.window_id;
+
+        if (memcmp(&new_config, &config, sizeof(noc_window_config)) == 0) {
+            return;
+        }
+
+        if (ioctl(fd, ioctl_config[kind], &new_config) < 0) {
             throw std::runtime_error("Couldn't reconfigure window");
         }
+
+        config = new_config;
     }
 
     size_t size() const { return mapped_size; }
@@ -89,15 +93,134 @@ private:
     static constexpr uint32_t ioctl_alloc[] = { L2CPU_IOCTL_ALLOC_2M, L2CPU_IOCTL_ALLOC_128G };
     static constexpr uint32_t ioctl_dealloc[] = { L2CPU_IOCTL_DEALLOC_2M, L2CPU_IOCTL_DEALLOC_128G };
     static constexpr uint32_t ioctl_config[] = { L2CPU_IOCTL_CONFIG_2M, L2CPU_IOCTL_CONFIG_128G };
-    static constexpr uint32_t window_shifts[] = { 21, 37 };
 };
 
-class NocDriver
+class SmartNocWindow
+{
+    NocWindow window;
+
+    // This is used to keep settings like ordering, posted writes, etc. for the
+    // lifetime of the window, even if it is hopped around while it is used.
+    const noc_window_config initial_config;
+public:
+    SmartNocWindow(int fd, uint64_t size, noc_window_config initial_config = {})
+        : window(fd, size, initial_config)
+        , initial_config(initial_config)
+    {
+    }
+
+    size_t size() const { return window.size(); }
+    void* window_base() const { return window.data(); }
+
+    uint32_t read32(uint32_t x, uint32_t y, uint64_t addr)
+    {
+        uint32_t value;
+        read_block(x, y, addr, &value, sizeof(value));
+        return value;
+    }
+
+    void write32(uint32_t x, uint32_t y, uint64_t addr, uint32_t val)
+    {
+        write_block(x, y, addr, &val, sizeof(val));
+    }
+
+    void read_block(uint32_t x, uint32_t y, uint64_t addr, void* dst, size_t size)
+    {
+        size_t window_size = window.size();
+        uint64_t window_addr = addr & ~(window_size - 1);
+        uint64_t offset = addr & (window_size - 1);
+        void* src = window.data() + offset;
+
+        if (size > window_size) {
+            throw std::runtime_error("Read size too large");
+        }
+
+        if (size + offset > window_size) {
+            throw std::runtime_error("Read crosses window boundary");
+        }
+
+        if (size <= 8 && (addr & (size - 1))) {
+            throw std::runtime_error("Unaligned read");
+        }
+
+        noc_window_config config = initial_config;
+        config.addr = window_addr;
+        config.x_end = x;
+        config.y_end = y;
+
+        window.reconfigure(config);
+
+        switch (size) {
+        case 1:
+            *reinterpret_cast<uint8_t*>(dst) = *reinterpret_cast<volatile uint8_t*>(src);
+            break;
+        case 2:
+            *reinterpret_cast<uint16_t*>(dst) = *reinterpret_cast<volatile uint16_t*>(src);
+            break;
+        case 4:
+            *reinterpret_cast<uint32_t*>(dst) = *reinterpret_cast<volatile uint32_t*>(src);
+            break;
+        case 8:
+            *reinterpret_cast<uint64_t*>(dst) = *reinterpret_cast<volatile uint64_t*>(src);
+            break;
+        default:
+            memcpy(dst, src, size);
+            break;
+        }
+    }
+
+    void write_block(uint32_t x, uint32_t y, uint64_t addr, const void* src, size_t size)
+    {
+        size_t window_size = window.size();
+        uint64_t window_addr = addr & ~(window_size - 1);
+        uint64_t offset = addr & (window_size - 1);
+        void* dst = window.data() + offset;
+
+        if (size > FOUR_GIGS) {
+            throw std::runtime_error("Read size too large");
+        }
+
+        if (size + offset > window_size) {
+            throw std::runtime_error("Read crosses window boundary");
+        }
+
+        if (size <= 8 && (addr & (size - 1))) {
+            throw std::runtime_error("Unaligned write");
+        }
+
+        noc_window_config config = initial_config;
+        config.addr = window_addr;
+        config.x_end = x;
+        config.y_end = y;
+
+        window.reconfigure(config);
+
+        switch (size) {
+        case 1:
+            *reinterpret_cast<volatile uint8_t*>(dst) = *reinterpret_cast<const uint8_t*>(src);
+            break;
+        case 2:
+            *reinterpret_cast<volatile uint16_t*>(dst) = *reinterpret_cast<const uint16_t*>(src);
+            break;
+        case 4:
+            *reinterpret_cast<volatile uint32_t*>(dst) = *reinterpret_cast<const uint32_t*>(src);
+            break;
+        case 8:
+            *reinterpret_cast<volatile uint64_t*>(dst) = *reinterpret_cast<const uint64_t*>(src);
+            break;
+        default:
+            memcpy(dst, src, size);
+            break;
+        }
+    }
+};
+
+class NOC
 {
     int fd;
 
 public:
-    NocDriver()
+    NOC()
         : fd(open("/dev/l2cpu-noc", O_RDWR))
     {
         if (fd < 0) {
@@ -105,12 +228,45 @@ public:
         }
     }
 
-    std::unique_ptr<NocWindow> open_window(uint64_t size, noc_window_config config)
+    std::unique_ptr<SmartNocWindow> open_window_2M(noc_window_config config = {})
     {
-        return std::make_unique<NocWindow>(fd, size, config);
+        return std::make_unique<SmartNocWindow>(fd, TWO_MEGS, config);
     }
 
-    ~NocDriver()
+    std::unique_ptr<SmartNocWindow> open_window_4G(noc_window_config config = {})
+    {
+        return std::make_unique<SmartNocWindow>(fd, FOUR_GIGS, config);
+    }
+
+    uint32_t read32(uint32_t x, uint32_t y, uint64_t addr)
+    {
+        return open_window_2M()->read32(x, y, addr);
+    }
+
+    void write32(uint32_t x, uint32_t y, uint64_t addr, uint32_t val)
+    {
+        open_window_2M()->write32(x, y, addr, val);
+    }
+
+    void read_block(uint32_t x, uint32_t y, uint64_t addr, void* dst, size_t size)
+    {
+        if (size <= TWO_MEGS) {
+            open_window_2M()->read_block(x, y, addr, dst, size);
+        } else {
+            open_window_4G()->read_block(x, y, addr, dst, size);
+        }
+    }
+
+    void write_block(uint32_t x, uint32_t y, uint64_t addr, const void* src, size_t size)
+    {
+        if (size <= TWO_MEGS) {
+            open_window_2M()->write_block(x, y, addr, src, size);
+        } else {
+            open_window_4G()->write_block(x, y, addr, src, size);
+        }
+    }
+
+    ~NOC()
     {
         if (fd >= 0) {
             close(fd);
@@ -118,169 +274,11 @@ public:
     }
 };
 
-class NocWindowPool
-{
-private:
-    // Is doing this in Rust any less aesthetically offensive?  As difficult?
-    // Using unique_ptr deleter wrecks the type signature.  I could pass a
-    // std::function into NocWindow() to do the deletion in ~NocWindow() but
-    // that's less explicit, less efficient... Ugh.
-    struct WindowDeleter
-    {
-        NocWindowPool* pool;
-        void operator()(NocWindow* ptr) { if (ptr) pool->release(ptr); }
-    };
-
-public:
-    using WindowHandle = std::unique_ptr<NocWindow, WindowDeleter>;
-
-    NocWindowPool(NocDriver& driver, size_t window_size, size_t quantity = 10)
-    {
-        for (size_t i = 0; i < quantity; ++i) {
-            auto window = driver.open_window(window_size, {});
-            windows.push(std::move(window));
-        }
-    }
-
-    // Potential optimization: pass in desired configuration and prioritize
-    // reusing windows that match the configuration.  Tradeoff between:
-    // Current situation: always reconfigure (syscall + reg writes + barrier)
-    // Reuse windows: Lookup overhead + potential reconfiguration anyway
-    //
-    // I think this is fine for now.  If you want to optimize, it makes sense to
-    // hold a window for each configuration you expect to use.
-    WindowHandle acquire()
-    {
-        std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock, [this]() { return !windows.empty(); });
-
-        // Take one down...
-        NocWindow* window = windows.front().release();
-        windows.pop();
-
-        // Pass it around...
-        return WindowHandle(window, WindowDeleter{this});
-    }
-
-private:
-    void release(NocWindow* window)
-    {
-        std::unique_lock<std::mutex> lock(mtx);
-        windows.push(std::unique_ptr<NocWindow>(window));
-        cv.notify_one();
-    }
-
-    std::queue<std::unique_ptr<NocWindow>> windows;
-    std::mutex mtx;
-    std::condition_variable cv;
-};
-
-using ManagedNocWindow = NocWindowPool::WindowHandle;
-
-class NOC
-{
-public:
-    NOC()
-        : driver()
-        , windows_2M(driver, TWO_MEGS, 10)
-        , windows_128G(driver, FOUR_GIGS, 5)
-    {
-    }
-
-    auto get_window(size_t window_size)
-    {
-        if (window_size == TWO_MEGS) {
-            return windows_2M.acquire();
-        }
-
-        if (window_size == FOUR_GIGS) {
-            return windows_128G.acquire();
-        }
-
-        throw std::runtime_error("Invalid window size");
-    }
-
-    auto get_window(size_t window_size, noc_window_config config)
-    {
-        auto window = get_window(window_size);
-        window->reconfigure(config);
-        return window;
-    }
-
-    uint32_t read32(uint32_t x, uint32_t y, uint64_t addr)
-    {
-        uint32_t val;
-        read(x, y, addr, &val, sizeof(val));
-        return val;
-    }
-
-    void write32(uint32_t x, uint32_t y, uint64_t addr, uint32_t val)
-    {
-        write(x, y, addr, &val, sizeof(val));
-    }
-
-    void read(uint32_t x, uint32_t y, uint64_t addr, void* dst, size_t size)
-    {
-        size_t window_size = size > TWO_MEGS ? FOUR_GIGS : TWO_MEGS;
-        uint64_t window_addr = addr & ~(window_size - 1);
-        uint64_t offset = addr & (window_size - 1);
-
-        if (size > FOUR_GIGS) {
-            throw std::runtime_error("Read size too large");
-        }
-
-        if (size + offset > window_size) {
-            throw std::runtime_error("Read crosses window boundary");
-        }
-
-        noc_window_config config{
-            .addr = window_addr,
-            .x_end = x,
-            .y_end = y,
-        };
-
-        auto window = get_window(window_size, config);
-        void* src = window->data() + offset;
-        std::memcpy(dst, src, size);
-    }
-
-    void write(uint32_t x, uint32_t y, uint64_t addr, const void* src, size_t size)
-    {
-        size_t window_size = size > TWO_MEGS ? FOUR_GIGS : TWO_MEGS;
-        uint64_t window_addr = addr & ~(window_size - 1);
-        uint64_t offset = addr & (window_size - 1);
-
-        if (size > FOUR_GIGS) {
-            throw std::runtime_error("Read size too large");
-        }
-
-        if (size + offset > window_size) {
-            throw std::runtime_error("Read crosses window boundary");
-        }
-
-        noc_window_config config{
-            .addr = window_addr,
-            .x_end = x,
-            .y_end = y,
-        };
-
-        auto window = get_window(window_size, config);
-        void* dst = window->data() + offset;
-        std::memcpy(dst, src, size);
-    }
-
-private:
-    NocDriver driver;
-    NocWindowPool windows_2M;
-    NocWindowPool windows_128G;
-};
-
 struct xy_t {
     uint32_t x, y;
     constexpr xy_t(uint32_t x_, uint32_t y_) : x(x_), y(y_) {}
 };
 
-// This language is a joke.  I should just have a table.
 template<std::size_t... Is>
 constexpr auto make_tensix_locations(std::index_sequence<Is...>) {
     return std::array<xy_t, sizeof...(Is)>{
@@ -312,7 +310,7 @@ struct Blackhole
         { 9, 0 }, { 9, 2 }, { 9, 9 }, { 9, 5 },
     }};
 
-    constexpr bool is_dram(uint32_t x, uint32_t y) const
+    static constexpr bool is_dram(uint32_t x, uint32_t y)
     {
         for (const auto& dram : DRAM_LOCATIONS_ALL) {
             if (dram.x == x && dram.y == y) {
@@ -322,10 +320,39 @@ struct Blackhole
         return false;
     }
 
-    constexpr bool is_tensix(uint32_t x, uint32_t y) const
+    static constexpr bool is_tensix(uint32_t x, uint32_t y)
     {
         return (y >= 2 && y <= 11) &&     // Valid y range
                ((x >= 1 && x <= 7) ||     // Left block
                 (x >= 10 && x <= 16));    // Right block
+    }
+};
+
+class Tensix
+{
+    NOC& noc;
+    uint32_t x, y;
+    std::unique_ptr<SmartNocWindow> window;
+public:
+    static constexpr uint64_t NOC_NODE_ID   = 0xffb20044ULL;
+    static constexpr uint64_t RESET         = 0xffb121b0ULL;
+
+    Tensix(NOC& noc, uint32_t x, uint32_t y)
+        : noc(noc)
+        , x(x)
+        , y(y)
+        , window(noc.open_window_2M())
+    {
+        if (!Blackhole::is_tensix(x, y)) {
+            throw std::runtime_error("Invalid tensix location");
+        }
+
+        auto node_id = window->read32(x, y, NOC_NODE_ID);
+        auto node_x = (node_id >> 0) & 0x3f;
+        auto node_y = (node_id >> 6) & 0x3f;
+
+        if (node_x != x || node_y != y) {
+            throw std::runtime_error("Invalid tensix node id");
+        }
     }
 };
