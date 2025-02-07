@@ -5,6 +5,7 @@
 #include "tlb_window.hpp"
 
 #include <fmt/core.h>
+#include <iostream>
 
 namespace tt {
 
@@ -167,7 +168,7 @@ class L2CPU
     // clang-format off
     static constexpr uint64_t PERIPHERAL_PORT   = 0x0000'0000'2000'0000ULL; // 256 MiB
     static constexpr uint64_t L3_ZERO_START     = 0x0000'0000'0A00'0000ULL; //   2 MiB
-    static constexpr uint64_t L3_ZERO_END       = 0x0000'0000'0A20'0000ULL; //   
+    static constexpr uint64_t L3_ZERO_END       = 0x0000'0000'0A20'0000ULL; //
     static constexpr uint64_t SYSTEM_PORT       = 0x0000'0000'3000'0000ULL; //  64 TiB
     static constexpr uint64_t MEMORY_PORT       = 0x0000'4000'3000'0000ULL; //  64 TiB
     static constexpr uint64_t L2CPU_REGISTERS   = 0xFFFF'F7FE'FFF0'0000ULL; // 512 KiB
@@ -178,14 +179,12 @@ class L2CPU
     BlackholePciDevice& device;
     const uint32_t our_noc0_x;
     const uint32_t our_noc0_y;
-    std::unique_ptr<TlbWindow> peripheral_port;
 
 public:
     L2CPU(BlackholePciDevice& device, uint32_t noc0_x, uint32_t noc0_y)
         : device(device)
         , our_noc0_x(noc0_x)
         , our_noc0_y(noc0_y)
-        , peripheral_port(device.map_tlb_4G(our_noc0_x, our_noc0_y, PERIPHERAL_PORT)) // Ugh
     {
     }
 
@@ -228,9 +227,38 @@ public:
         mfence();
 
         // Where in X280 address space the window begins:
-        // return 0x0000'0020'3000'0000ULL + (0x200000 * tlb_index);
-        auto access_address = ((1ULL << 37) | (0x200000 * tlb_index) | SYSTEM_PORT) + local_offset;
-        return access_address;
+        return 0x0000'0020'3000'0000ULL + (0x200000 * tlb_index);
+    }
+
+    void print_noc_tlb_2M(size_t tlb_index)
+    {
+        auto registers = device.map_tlb_2M_UC(our_noc0_x, our_noc0_y, L2CPU_REGISTERS);
+        size_t tlb_config_offset = tlb_index * 0x10;
+
+        l2cpu::Tlb2M tlb{};
+        tlb.data[0] = registers->read32(tlb_config_offset + 0x0);
+        tlb.data[1] = registers->read32(tlb_config_offset + 0x4);
+        tlb.data[2] = registers->read32(tlb_config_offset + 0x8);
+        tlb.data[3] = registers->read32(tlb_config_offset + 0xC);
+        uint64_t address = tlb.address << 21;
+        uint64_t x = tlb.x_end;
+        uint64_t y = tlb.y_end;
+        fmt::print("{} addr: {:#x}, x: {}, y: {}\n", tlb_index, address, x, y);
+    }
+
+    void print_noc_tlb_128G(size_t tlb_index)
+    {
+        auto registers = device.map_tlb_2M_UC(our_noc0_x, our_noc0_y, L2CPU_REGISTERS);
+        size_t tlb_config_offset = 0xE00 + (tlb_index * 0xC);
+
+        l2cpu::Tlb128G tlb{};
+        tlb.data[0] = registers->read32(tlb_config_offset + 0x0);
+        tlb.data[1] = registers->read32(tlb_config_offset + 0x4);
+        tlb.data[2] = registers->read32(tlb_config_offset + 0x8);
+        uint64_t address = (size_t)tlb.address << 37ULL;
+        uint64_t x = tlb.x_end;
+        uint64_t y = tlb.y_end;
+        fmt::print("{} addr: {:#x}, x: {}, y: {}\n", tlb_index, address, x, y);
     }
 
     uint64_t configure_noc_tlb_128G(size_t tlb_index, uint32_t noc_x, uint32_t noc_y, uint64_t address)
@@ -250,7 +278,7 @@ public:
 
         // HACK!
         // tlb.strict_order = 1;
-        tlb.posted = 1;
+        // tlb.posted = 1;
 
         mfence();
         registers->write32(tlb_config_offset + 0x0, tlb.data[0]);
@@ -266,16 +294,19 @@ public:
         //  the address is evaluated after passing ddr_noc_xbar which sends 0x2000000000+ to NOC
         //  So I think the first 128GB TLB is at system_port_address + noc_address + bit 43 = 0x82030000000
         //
+        // Maybe that's not right?!
+        // 0x0060_3000_0000
 
-        auto access_address = ((1ULL << 43) | ((1ULL << 37) * (1 + tlb_index)) | SYSTEM_PORT) + local_offset;
+        // auto access_address = 0x82030000000 + (0x2000000000 * tlb_index) + local_offset;
+        // auto access_address = ((1ULL << 43) | ((1ULL << 37) * (1 + tlb_index)) | SYSTEM_PORT) + local_offset;
+        auto access_address = 0x80430000000ULL + ((1ULL << 37) * tlb_index) + local_offset;
         return access_address;
-        // return ((1ULL << 43) | ((1ULL << 37) * (1 + tlb_index)) | MEMORY_PORT) + local_offset;
     }
 
     void configure_prefetcher(uint32_t prefetcher_ctrl0, uint32_t prefetcher_ctrl1)
     {
         std::vector<uint64_t> offsets = { 0x0000, 0x2000, 0x4000, 0x6000 };
-        for (auto offset : offsets) { 
+        for (auto offset : offsets) {
             auto addr = L2CPU_PREFETCH + offset;
             auto val = read32(addr);
 
@@ -287,6 +318,31 @@ public:
             write32(addr, prefetcher_ctrl1);
 
             fmt::print("Prefetcher at {:#x} configured: {:#x} -> {:#x}\n", addr, val, prefetcher_ctrl1);
+
+            l2cpu::PrefetcherCtrl0 ctrl0;
+            l2cpu::PrefetcherCtrl1 ctrl1;
+            ctrl0.value = prefetcher_ctrl0;
+            ctrl1.value = prefetcher_ctrl1;
+
+            // fmt::print("Prefetcher settings: scalarLoadSupportEn: {}, initialDist: {}, maxAllowedDist: {}, "
+            //            "linToExpThrd: {}, crossPageEn: {}, forgiveThrd: {}\n",
+            //            (int)ctrl0.bits.scalarLoadSupportEn, (int)ctrl0.bits.initialDist, (int)ctrl0.bits.maxAllowedDist,
+            //            (int)ctrl0.bits.linToExpThrd, (int)ctrl0.bits.crossPageEn, (int)ctrl0.bits.forgiveThrd);
+
+            fmt::println("scalarLoadSupportEn: {}", (int)ctrl0.bits.scalarLoadSupportEn);
+            fmt::println("initialDist: {}", (int)ctrl0.bits.initialDist);
+            fmt::println("maxAllowedDist: {}", (int)ctrl0.bits.maxAllowedDist);
+            fmt::println("linToExpThrd: {}", (int)ctrl0.bits.linToExpThrd);
+            fmt::println("crossPageEn: {}", (int)ctrl0.bits.crossPageEn);
+            fmt::println("forgiveThrd: {}\n", (int)ctrl0.bits.forgiveThrd);
+            fmt::println("qFullnessThrd: {}", (int)ctrl1.bits.qFullnessThrd);
+            fmt::println("hitCacheThrd: {}", (int)ctrl1.bits.hitCacheThrd);
+            fmt::println("hitMSHRThrd: {}", (int)ctrl1.bits.hitMSHRThrd);
+            fmt::println("window: {}", (int)ctrl1.bits.window);
+            fmt::println("scalarStoreSupportEn: {}", (int)ctrl1.bits.scalarStoreSupportEn);
+            fmt::println("vectorLoadSupportEn: {}", (int)ctrl1.bits.vectorLoadSupportEn);
+            fmt::println("vectorStoreSupportEn: {}\n", (int)ctrl1.bits.vectorStoreSupportEn);
+
         }
     }
 
