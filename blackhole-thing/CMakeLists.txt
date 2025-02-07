@@ -17,20 +17,8 @@ target_link_libraries(iommu_test blackhole_thing)
 add_executable(console console.cpp)
 target_link_libraries(console blackhole_thing)
 
-add_executable(x280_bench x280_bench.cpp)
-target_link_libraries(x280_bench blackhole_thing)
-
-add_executable(prefetcher prefetcher.cpp)
-target_link_libraries(prefetcher blackhole_thing)
-
-add_executable(fivetwelve fivetwelve.cpp)
-target_link_libraries(fivetwelve blackhole_thing)
-
 add_executable(mmio_bench mmio_bench.cpp)
 target_link_libraries(mmio_bench blackhole_thing)
-
-add_executable(x280_futz x280_futz.cpp)
-target_link_libraries(x280_futz blackhole_thing)
 
 add_executable(tensix_reset tensix_reset.cpp)
 target_link_libraries(tensix_reset blackhole_thing)

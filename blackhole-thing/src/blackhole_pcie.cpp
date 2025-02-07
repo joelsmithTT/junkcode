@@ -166,7 +166,6 @@ static uint8_t* map_bar0(int fd, size_t size)
 static uint8_t* map_bar2(int fd, size_t size)
 {
     auto uc_resource = get_mapping(fd, TENSTORRENT_MAPPING_RESOURCE1_UC); // BAR2 is index 1
-    fmt::print("uc_resource.mapping_base: {:#x}, uc_resource.mapping_size: {:#x}\n", uc_resource.mapping_base, uc_resource.mapping_size);
     void* bar2 = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, uc_resource.mapping_base);
 
     CHECK(bar2 != MAP_FAILED);

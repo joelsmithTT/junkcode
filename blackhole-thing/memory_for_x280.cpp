@@ -207,6 +207,7 @@ int main(int argc, char** argv) {
 
         // TODO: this program makes a kernel mess if I leave it running when I
         // kick the card off the PCIe bus so I can power cycle it.
+        // Great news, that's fixed!
 
         std::cout << "OK, you can use it.\nIOVA: 0x" << std::hex << iova << std::endl;
         std::cout << "X280: 0x" << x280_addr << std::endl;
