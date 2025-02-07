@@ -59,7 +59,16 @@
 // ARC owns telemetry
 #define ARC_X 8
 #define ARC_Y 0
-#define ARC_TELEMETRY_PTR 0x80030434
+#define RESET_SCRATCH(N) (0x80030400 + ((N) * 4))
+#define ARC_TELEMETRY_PTR RESET_SCRATCH(13)
+#define ARC_TELEMETRY_DATA RESET_SCRATCH(12)
+
+// These are from ARC FW telemetry.h, guaranteed not to change
+#define TELEMETRY_VCORE 6
+#define TELEMETRY_POWER 7
+#define TELEMETRY_CURRENT 8
+#define TELEMETRY_ASIC_TEMP 11
+
 
 /**
  * struct l2cpu_noc_dev - NOC device state
@@ -100,12 +109,13 @@ struct l2cpu_noc_dev {
  * @noc: NOC device
  * @owned_2M: Bitmap of 2M windows owned by this file descriptor
  * @owned_128G: Bitmap of 128G windows owned by this file descriptor
+ * @mapped_2M_count: mmap reference count for 2M windows
+ * @mapped_128G_count: mmap reference count for 128G windows
  */
 struct l2cpu_noc_fd {
 	struct l2cpu_noc_dev *noc;
 	DECLARE_BITMAP(owned_2M, WINDOW_2M_COUNT);
 	DECLARE_BITMAP(owned_128G, WINDOW_128G_COUNT);
-
 	atomic_t mapped_2M_count[WINDOW_2M_COUNT];
 	atomic_t mapped_128G_count[WINDOW_128G_COUNT];
 };
@@ -246,10 +256,10 @@ static int configure_window_2M(struct l2cpu_noc_dev *noc, struct noc_window_conf
 	offset = window_id * 0x10;
 
 	mb();
-	writel(reg.data[0], noc->config_regs_2M + offset + 0x0);
-	writel(reg.data[1], noc->config_regs_2M + offset + 0x4);
-	writel(reg.data[2], noc->config_regs_2M + offset + 0x8);
-	writel(reg.data[3], noc->config_regs_2M + offset + 0xC);
+	iowrite32(reg.data[0], noc->config_regs_2M + offset + 0x0);
+	iowrite32(reg.data[1], noc->config_regs_2M + offset + 0x4);
+	iowrite32(reg.data[2], noc->config_regs_2M + offset + 0x8);
+	iowrite32(reg.data[3], noc->config_regs_2M + offset + 0xC);
 	wmb();
 
 	return 0;
@@ -288,9 +298,9 @@ static int configure_window_128G(struct l2cpu_noc_dev *noc, struct noc_window_co
 	offset = window_id * 0xC;
 
 	mb();
-	writel(reg.data[0], noc->config_regs_128G + offset + 0x0);
-	writel(reg.data[1], noc->config_regs_128G + offset + 0x4);
-	writel(reg.data[2], noc->config_regs_128G + offset + 0x8);
+	iowrite32(reg.data[0], noc->config_regs_128G + offset + 0x0);
+	iowrite32(reg.data[1], noc->config_regs_128G + offset + 0x4);
+	iowrite32(reg.data[2], noc->config_regs_128G + offset + 0x8);
 	wmb();
 
 	return 0;
@@ -308,10 +318,10 @@ static bool is_2M_window_configured(struct l2cpu_noc_dev *noc, int window_id)
 	if (window_id < 0 || window_id >= WINDOW_2M_COUNT)
 		return false;
 
-	reg.data[0] = readl(noc->config_regs_2M + offset + 0x0);
-	reg.data[1] = readl(noc->config_regs_2M + offset + 0x4);
-	reg.data[2] = readl(noc->config_regs_2M + offset + 0x8);
-	reg.data[3] = readl(noc->config_regs_2M + offset + 0xC);
+	reg.data[0] = ioread32(noc->config_regs_2M + offset + 0x0);
+	reg.data[1] = ioread32(noc->config_regs_2M + offset + 0x4);
+	reg.data[2] = ioread32(noc->config_regs_2M + offset + 0x8);
+	reg.data[3] = ioread32(noc->config_regs_2M + offset + 0xC);
 
 	return reg.addr != window_id || reg.data[1] || reg.data[2] || reg.data[3];
 }
@@ -328,9 +338,9 @@ static bool is_128G_window_configured(struct l2cpu_noc_dev *noc, int window_id)
 	if (window_id < 0 || window_id >= WINDOW_128G_COUNT)
 		return false;
 
-	reg.data[0] = readl(noc->config_regs_128G + offset + 0x0);
-	reg.data[1] = readl(noc->config_regs_128G + offset + 0x4);
-	reg.data[2] = readl(noc->config_regs_128G + offset + 0x8);
+	reg.data[0] = ioread32(noc->config_regs_128G + offset + 0x0);
+	reg.data[1] = ioread32(noc->config_regs_128G + offset + 0x4);
+	reg.data[2] = ioread32(noc->config_regs_128G + offset + 0x8);
 
 	return reg.addr != window_id || reg.data[1] || reg.data[2];
 }
@@ -399,7 +409,7 @@ static int allocate_128G_window(struct l2cpu_noc_dev *noc)
 
 /**
  * deallocate_2M_window - Deallocate a 2M window
- * Return: 0 on success, -EINVAL if ID is invalid, -EBUSY if window is in use
+ * Return: 0 on success, -EINVAL if ID is invalid.
  */
 static int deallocate_2M_window(struct l2cpu_noc_dev *noc, int window_id)
 {
@@ -419,7 +429,7 @@ static int deallocate_2M_window(struct l2cpu_noc_dev *noc, int window_id)
 
 /**
  * deallocate_128G_window - Deallocate a 128G window
- * Return: 0 on success, -EINVAL if ID is invalid, -EBUSY if window is in use
+ * Return: 0 on success, -EINVAL if ID is invalid.
  */
 static int deallocate_128G_window(struct l2cpu_noc_dev *noc, int window_id)
 {
@@ -756,10 +766,6 @@ static int l2cpu_cdev_mmap(struct file *file, struct vm_area_struct *vma)
 		}
 	}
 
-	// TODO: is there a way to use hugepages for IO memory here?
-	// I don't want to eat up the system's DRAM for hugepages, just use fewer
-	// CPU TLB entries for the NOC windows.
-
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 	vma->vm_ops = &l2cpu_vm_ops;
 	ret = io_remap_pfn_range(vma, vma->vm_start, offset >> PAGE_SHIFT, size, vma->vm_page_prot);
@@ -813,7 +819,7 @@ static u32 noc_read32(struct l2cpu_noc_dev *noc, u32 x, u32 y, u64 addr)
 	config.y_end = y;
 
 	configure_window_2M(noc, &config);
-	val = readl(noc->driver_window + (addr & (WINDOW_2M_SIZE - 1)));
+	val = ioread32(noc->driver_window + (addr & (WINDOW_2M_SIZE - 1)));
 
 	return val;
 }
@@ -853,20 +859,24 @@ struct l2cpu_hwmon_label {
 };
 
 struct l2cpu_hwmon_attr {
-	u32 syseng_magic;
+	u32 tag_id;
 	enum hwmon_sensor_types type;
 	u32 attr;
 	u32 addr;
 };
 
 static const struct l2cpu_hwmon_label l2cpu_hwmon_labels[] = {
-	{ hwmon_temp, hwmon_temp_label, "ASIC Temperature" },
-	{ hwmon_in, hwmon_in_label, "VCORE" },
+	{ hwmon_temp,  hwmon_temp_label,  "asic_temp" },
+	{ hwmon_in,    hwmon_in_label,    "vcore"     },
+	{ hwmon_curr,  hwmon_curr_label,  "current"   },
+	{ hwmon_power, hwmon_power_label, "power"     },
 };
 
 static struct l2cpu_hwmon_attr l2cpu_hwmon_attrs[] = {
-	{ 11, hwmon_temp, hwmon_temp_input, 0x0 },
-	{ 6, hwmon_in, hwmon_in_input, 0x0 },
+	{ TELEMETRY_ASIC_TEMP, hwmon_temp,  hwmon_temp_input,  0x0 },
+	{ TELEMETRY_VCORE,     hwmon_in,    hwmon_in_input,    0x0 },
+	{ TELEMETRY_CURRENT,   hwmon_curr,  hwmon_curr_input,  0x0  },
+	{ TELEMETRY_POWER,     hwmon_power, hwmon_power_input, 0x0 },
 };
 
 /**
@@ -909,8 +919,12 @@ static int l2cpu_hwmon_read(struct device *dev, enum hwmon_sensor_types type, u3
 				u32 int_part = raw >> 16;
 				u32 frac_part = raw & 0xffff;
 				*val = (int_part * 1000) + ((frac_part * 1000) / 65536);
-			} else {
-				*val = raw;
+			} else if (type == hwmon_curr) {
+				*val = raw * 1000;     // Convert A to mA
+			} else if (type == hwmon_power) {
+				*val = raw * 1000000;  // Convert W to uW
+			} else if (type == hwmon_in) {
+				*val = raw;            // Reported in mV
 			}
 			return 0;
 		}
@@ -941,6 +955,8 @@ static int l2cpu_hwmon_read_string(struct device *dev, enum hwmon_sensor_types t
 static const struct hwmon_channel_info *l2cpu_hwmon_channel_info[] = {
 	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT | HWMON_T_LABEL),
 	HWMON_CHANNEL_INFO(in, HWMON_I_INPUT | HWMON_I_LABEL),
+	HWMON_CHANNEL_INFO(curr, HWMON_C_INPUT | HWMON_C_LABEL),
+	HWMON_CHANNEL_INFO(power, HWMON_P_INPUT | HWMON_P_LABEL),
 	NULL,
 };
 
@@ -964,30 +980,33 @@ static int initialize_hwmon(struct l2cpu_noc_dev *noc)
 {
 	struct platform_device *pdev = noc->pdev;
 	struct device *hwmon_device;
-	u32 base_addr, num_entries;
-	u32 tags_addr, data_addr;
-	u32 tag_entry, offset;
-	int i, j;
+	u32 base_addr = noc_read32(noc, ARC_X, ARC_Y, ARC_TELEMETRY_PTR);
+	u32 data_addr = noc_read32(noc, ARC_X, ARC_Y, ARC_TELEMETRY_DATA);
+	u32 version = noc_read32(noc, ARC_X, ARC_Y, base_addr);
+	u32 major_ver = (version >> 16) & 0xFF;
+	u32 minor_ver = (version >> 8) & 0xFF;
+	u32 patch_ver = version & 0xFF;
+	u32 tags_addr = base_addr + 8;
+	u32 num_entries;
+	u32 i, j;
 
-	// Do the stupid discovery dance
-	base_addr = noc_read32(noc, ARC_X, ARC_Y, ARC_TELEMETRY_PTR);
-	num_entries = noc_read32(noc, ARC_X, ARC_Y, base_addr + 0x4);
+	if (major_ver > 1) {
+		dev_err(&pdev->dev, "Unsupported telemetry version %u.%u.%u\n", major_ver, minor_ver, patch_ver);
+		return -ENOTSUPP;
+	}
 
-	if (num_entries > 1024)
-		return -EINVAL;
+	num_entries = noc_read32(noc, ARC_X, ARC_Y, base_addr + 4);
 
-	tags_addr = base_addr + 0x8;
-	data_addr = tags_addr + (num_entries * 4);
+	for (i = 0; i < num_entries; ++i) {
+		u32 tag_entry = noc_read32(noc, ARC_X, ARC_Y, tags_addr + (i * 4));
+		u16 tag_id = tag_entry & 0xFFFF;
+		u16 offset = (tag_entry >> 16) & 0xFFFF;
+		u32 addr = data_addr + (offset * 4);
 
-	for (i = 0; i < ARRAY_SIZE(l2cpu_hwmon_attrs); ++i) {
-		struct l2cpu_hwmon_attr *hwmon_attr = &l2cpu_hwmon_attrs[i];
-		// Scan the tag array for our tag
-		for (j = 0; j < num_entries; ++j) {
-			tag_entry = noc_read32(noc, ARC_X, ARC_Y, tags_addr + (j * 4));
-			if ((tag_entry & 0xff) == hwmon_attr->syseng_magic) {
-				// Found it - update the address in our hwmon attribute
-				offset = (tag_entry >> 16) & 0xff;
-				hwmon_attr->addr = data_addr + (offset * 4);
+		for (j = 0; j < ARRAY_SIZE(l2cpu_hwmon_attrs); ++j) {
+			struct l2cpu_hwmon_attr *hwmon_attr = &l2cpu_hwmon_attrs[j];
+			if (hwmon_attr->tag_id == tag_id) {
+				hwmon_attr->addr = addr;
 				break;
 			}
 		}
