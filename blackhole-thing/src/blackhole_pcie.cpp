@@ -104,6 +104,8 @@ static PciDeviceInfo get_device_info(int fd)
 {
     tenstorrent_get_device_info info{};
 
+    info.in.output_size_bytes = sizeof(tenstorrent_get_device_info_out);
+
     IOCTL(fd, TENSTORRENT_IOCTL_GET_DEVICE_INFO, &info);
 
     uint16_t bus = info.out.bus_dev_fn >> 8;
