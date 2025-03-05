@@ -29,3 +29,7 @@ target_link_libraries(memory_for_x280 blackhole_thing)
 add_executable(x280-net x280-net.cpp)
 target_link_libraries(x280-net blackhole_thing)
 
+add_executable(p550 p550.cpp)
+target_link_libraries(p550 blackhole_thing)
+
+
