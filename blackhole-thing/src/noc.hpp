@@ -429,7 +429,8 @@ private:
         bar0_write32(DBI + 0, 0x00200000);
         bar0_write32(DBI + 4, 0x00200000);
 #endif
-        uint64_t regs = 0x300000 + (0x200 * region);
+        //uint64_t regs = 0x300000 + (0x200 * region);
+        uint64_t regs = (0x200 * region);
 
         uint32_t ctrl1 = 0x00000000;
         uint32_t crtl2 = limit == 0 ? 0 : 0x88280000;
