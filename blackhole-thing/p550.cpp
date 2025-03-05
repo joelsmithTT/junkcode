@@ -74,10 +74,9 @@ static void p550(int argc, char** argv)
     noc::NocAccess noc("/dev/tenstorrent/0");
     wormhole_sanity_test(noc);
     wormhole_touch_dram(noc);
-    std::exit(0);
 
     pci::Device device("/dev/tenstorrent/0");
-    pci::DmaBuffer buffer(device, 0x100000);
+    pci::DmaBuffer buffer(device, 0x100000, 0x0);
 
     uint32_t* data = reinterpret_cast<uint32_t*>(buffer.data());
     size_t n = buffer.length() / sizeof(uint32_t);
@@ -87,7 +86,8 @@ static void p550(int argc, char** argv)
     }
 
     for (size_t i = 0; i < n; i++) {
-        uint32_t value_1 = noc.read_register(WH_PCIE_X, WH_PCIE_Y, buffer.dma_address() + i);
+        uint64_t wormhole = 0x8'0000'0000ULL;
+        uint32_t value_1 = noc.read_register(WH_PCIE_X, WH_PCIE_Y, wormhole + i);
         uint32_t value_2 = data[i];
         if (value_1 != value_2) {
             printf("Mismatch at %08zx: %08x != %08x\n", i, value_1, value_2);
