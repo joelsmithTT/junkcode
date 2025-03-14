@@ -1,4 +1,5 @@
 #include "blackhole_pcie.hpp"
+#include <array>
 #include <chrono>
 #include <csignal>
 #include <cstring>
