@@ -236,7 +236,7 @@ public:
     }
 };
 
-void fucking_dbi(uint8_t* bar0, uint8_t* bar2)
+void dbi_thing(uint8_t* bar0, uint8_t* bar2)
 {
     static constexpr uint64_t ARC_RESET = 0x1FF30000;
     static constexpr uint64_t PCI_RESERVED = 0x0078;
@@ -330,7 +330,6 @@ int main(int argc, char** argv)
     }
     uint8_t* bar0 = pci::map_bar0(fd, 1 << 29);
     uint8_t* bar2 = pci::map_bar2(fd, 1 << 20);
-    // fucking_dbi(bar0, bar2);
     WormholeDMA dma(fd, bar0, bar2);
 
     noc::NocAccess noc("/dev/tenstorrent/0");
