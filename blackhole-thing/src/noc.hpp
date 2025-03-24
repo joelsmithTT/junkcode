@@ -14,6 +14,207 @@
 
 #include "ioctl.h"
 
+namespace pci {
+
+inline tenstorrent_mapping get_mapping(int fd, int id)
+{
+    static const size_t NUM_MAPPINGS = 8; // TODO(jms) magic 8
+    struct
+    {
+        tenstorrent_query_mappings query_mappings{};
+        tenstorrent_mapping mapping_array[NUM_MAPPINGS];
+    } mappings;
+
+    mappings.query_mappings.in.output_mapping_count = NUM_MAPPINGS;
+
+    ioctl(fd, TENSTORRENT_IOCTL_QUERY_MAPPINGS, &mappings.query_mappings);
+
+    for (size_t i = 0; i < NUM_MAPPINGS; i++) {
+        if (mappings.mapping_array[i].mapping_id == id) {
+            return mappings.mapping_array[i];
+        }
+    }
+
+    throw std::runtime_error("Unknown mapping");
+}
+
+inline uint8_t* map_bar2(int fd, size_t size)
+{
+    auto uc_resource = get_mapping(fd, TENSTORRENT_MAPPING_RESOURCE1_UC); // BAR2 is index 1
+    void* bar2 = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, uc_resource.mapping_base);
+
+    if (bar2 == MAP_FAILED) {
+        throw std::system_error(errno, std::generic_category(), "Failed to map BAR2");
+    }
+
+    if (size != uc_resource.mapping_size) {
+        throw std::runtime_error("BAR2 size mismatch");
+    }
+
+    return static_cast<uint8_t*>(bar2);
+}
+
+static uint8_t* map_bar0(int fd, size_t size)
+{
+    auto wc_resource = get_mapping(fd, TENSTORRENT_MAPPING_RESOURCE0_WC);
+    auto uc_resource = get_mapping(fd, TENSTORRENT_MAPPING_RESOURCE0_UC);
+
+    // There exists a convention that BAR0 is divided into write-combined (lower) and uncached (upper) mappings.
+    auto wc_size = (156 * (1 << 20)) + (10 * (1 << 21)) + (19 * (1 << 24));
+    auto uc_size = uc_resource.mapping_size - wc_size;
+    auto wc_offset = 0;
+    auto uc_offset = wc_size;
+
+    uc_resource.mapping_base += wc_size;
+
+    auto* bar0 = static_cast<uint8_t*>(mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+
+    if (bar0 == MAP_FAILED) {
+        throw std::system_error(errno, std::generic_category(), "Failed to map BAR0");
+    }
+
+    void* wc = mmap(bar0 + wc_offset, wc_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, wc_resource.mapping_base);
+    void* uc = mmap(bar0 + uc_offset, uc_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, uc_resource.mapping_base);
+
+    if (uc == MAP_FAILED || wc == MAP_FAILED) {
+        throw std::system_error(errno, std::generic_category(), "Failed to map BAR0");
+    }
+
+    return bar0;
+}
+
+namespace noc
+{
+    class NocAccess;
+} // namespace noc
+
+class Device
+{
+    int fd;
+    uint8_t *bar0;
+    uint8_t *bar2;
+    noc::NocAccess *noc;
+public:
+    Device(const std::string& chardev_path)
+        : fd(open(chardev_path.c_str(), O_RDWR | O_CLOEXEC))
+        , bar0(map_bar0(fd, 1 << 29))
+        , bar2(map_bar2(fd, 1 << 20))
+    {
+    }
+
+    void map_for_dma(void* buffer, size_t size, uint64_t noc_addr)
+    {
+        tenstorrent_pin_pages pin{};
+        pin.in.output_size_bytes = sizeof(pin.out);
+        pin.in.virtual_address = reinterpret_cast<uint64_t>(buffer);
+        pin.in.size = size;
+
+        if (ioctl(fd, TENSTORRENT_IOCTL_PIN_PAGES, &pin) != 0) {
+            throw std::system_error(errno, std::generic_category(), "Failed to pin pages");
+        }
+
+        uint64_t iova = pin.out.physical_address;
+        // TODO: configure iATU, ugh.
+
+        configure_iatu(0, (size - 1), noc_addr, iova);
+    }
+
+    void unmap_for_dma(void *buffer)
+    {
+        tenstorrent_unpin_pages unpin{};
+        unpin.in.virtual_address = reinterpret_cast<uintptr_t>(buffer);
+
+        if (ioctl(fd, TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin) != 0) {
+            throw std::system_error(errno, std::generic_category(), "Failed to unpin pages");
+        }
+    }
+
+    ~Device()
+    {
+        close(fd);
+    }
+
+private:
+    void bar0_write32(uint64_t offset, uint32_t value)
+    {
+        *reinterpret_cast<volatile uint32_t*>(bar0 + offset) = value;
+    }
+
+    void bar2_write32(uint64_t offset, uint32_t value)
+    {
+        *reinterpret_cast<volatile uint32_t*>(bar2 + offset) = value;
+    }
+
+    void configure_iatu(uint32_t region, uint32_t limit, uint64_t chip_address, uint64_t bus_address)
+    {
+#if GEEZ_PUT_THIS_IN_THE_DRIVER_ALREADY
+        auto write_iatu_reg = [&](uint32_t addr, uint32_t val) {
+            bar2_write32(0x1200 + addr, val);
+        };
+
+        //uint64_t regs = 0x300000 + (0x200 * region);
+        uint64_t regs = (0x200 * region);
+
+        uint32_t ctrl1 = 0x00000000;
+        uint32_t crtl2 = limit == 0 ? 0 : 0x88280000;
+        uint32_t lower_base = chip_address & 0xFFFFFFFF;
+        uint32_t upper_base = (chip_address >> 32) & 0xFFFFFFFF;
+        limit = limit == 0 ? 0x0 : limit - 1;
+        uint32_t lower_target = bus_address & 0xFFFFFFFF;
+        uint32_t upper_target = (bus_address >> 32) & 0xFFFFFFFF;
+
+        write_iatu_reg(regs + 0x00, ctrl1);
+        write_iatu_reg(regs + 0x04, crtl2);
+        write_iatu_reg(regs + 0x08, lower_base);
+        write_iatu_reg(regs + 0x0C, upper_base);
+        write_iatu_reg(regs + 0x10, limit);
+        write_iatu_reg(regs + 0x14, lower_target);
+        write_iatu_reg(regs + 0x18, upper_target);
+#endif
+    }
+
+};
+
+class DmaBuffer
+{
+    Device& device;
+    size_t size;
+    void* buffer;
+    uint64_t iova;
+
+public:
+    DmaBuffer(Device& device, size_t size, uint64_t iova)
+        : device(device)
+        , size(size)
+        , buffer(std::aligned_alloc(0x1000, size))
+        , iova(0)
+    {
+        if (!buffer) {
+            throw std::bad_alloc();
+        }
+
+        try {
+            device.map_for_dma(buffer, size, iova);
+        } catch (...) {
+            std::free(buffer);
+            throw;
+        }
+    }
+
+    uint8_t* data() { return static_cast<uint8_t*>(buffer); }
+    size_t length() const { return size; }
+
+    ~DmaBuffer() noexcept
+    {
+        try {
+            device.unmap_for_dma(buffer);
+            std::free(buffer);
+        } catch (...) {
+        }
+    }
+};
+} // namespace pci
+
 namespace noc {
 
 // Represents the hardware resource of PCIe->NOC aperture.
@@ -240,9 +441,36 @@ public:
         }
     }
 
+    int get_fd() const { return fd; }
+
     ~NocAccess() noexcept
     {
         close(fd);
+    }
+
+    uint64_t map_for_dma(void* buffer, size_t size)
+    {
+        tenstorrent_pin_pages pin{};
+        pin.in.output_size_bytes = sizeof(pin.out);
+        pin.in.virtual_address = reinterpret_cast<uint64_t>(buffer);
+        pin.in.size = size;
+
+        if (ioctl(fd, TENSTORRENT_IOCTL_PIN_PAGES, &pin) != 0) {
+            throw std::system_error(errno, std::generic_category(), "Failed to pin pages");
+        }
+
+        uint64_t iova = pin.out.physical_address;
+        return iova;
+    }
+
+    void unmap_for_dma(void *buffer)
+    {
+        tenstorrent_unpin_pages unpin{};
+        unpin.in.virtual_address = reinterpret_cast<uintptr_t>(buffer);
+
+        if (ioctl(fd, TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin) != 0) {
+            throw std::system_error(errno, std::generic_category(), "Failed to unpin pages");
+        }
     }
 
     void write_register(uint32_t x, uint32_t y, uint64_t address, uint32_t value)
@@ -313,200 +541,6 @@ public:
 
 } // namespace noc
 
-namespace pci {
-
-inline tenstorrent_mapping get_mapping(int fd, int id)
-{
-    static const size_t NUM_MAPPINGS = 8; // TODO(jms) magic 8
-    struct
-    {
-        tenstorrent_query_mappings query_mappings{};
-        tenstorrent_mapping mapping_array[NUM_MAPPINGS];
-    } mappings;
-
-    mappings.query_mappings.in.output_mapping_count = NUM_MAPPINGS;
-
-    ioctl(fd, TENSTORRENT_IOCTL_QUERY_MAPPINGS, &mappings.query_mappings);
-
-    for (size_t i = 0; i < NUM_MAPPINGS; i++) {
-        if (mappings.mapping_array[i].mapping_id == id) {
-            return mappings.mapping_array[i];
-        }
-    }
-
-    throw std::runtime_error("Unknown mapping");
-}
-
-inline uint8_t* map_bar2(int fd, size_t size)
-{
-    auto uc_resource = get_mapping(fd, TENSTORRENT_MAPPING_RESOURCE1_UC); // BAR2 is index 1
-    void* bar2 = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, uc_resource.mapping_base);
-
-    if (bar2 == MAP_FAILED) {
-        throw std::system_error(errno, std::generic_category(), "Failed to map BAR2");
-    }
-
-    if (size != uc_resource.mapping_size) {
-        throw std::runtime_error("BAR2 size mismatch");
-    }
-
-    return static_cast<uint8_t*>(bar2);
-}
-
-static uint8_t* map_bar0(int fd, size_t size)
-{
-    auto wc_resource = get_mapping(fd, TENSTORRENT_MAPPING_RESOURCE0_WC);
-    auto uc_resource = get_mapping(fd, TENSTORRENT_MAPPING_RESOURCE0_UC);
-
-    // There exists a convention that BAR0 is divided into write-combined (lower) and uncached (upper) mappings.
-    auto wc_size = (156 * (1 << 20)) + (10 * (1 << 21)) + (19 * (1 << 24));
-    auto uc_size = uc_resource.mapping_size - wc_size;
-    auto wc_offset = 0;
-    auto uc_offset = wc_size;
-
-    uc_resource.mapping_base += wc_size;
-
-    auto* bar0 = static_cast<uint8_t*>(mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-
-    if (bar0 == MAP_FAILED) {
-        throw std::system_error(errno, std::generic_category(), "Failed to map BAR0");
-    }
-
-    void* wc = mmap(bar0 + wc_offset, wc_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, wc_resource.mapping_base);
-    void* uc = mmap(bar0 + uc_offset, uc_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, uc_resource.mapping_base);
-
-    if (uc == MAP_FAILED || wc == MAP_FAILED) {
-        throw std::system_error(errno, std::generic_category(), "Failed to map BAR0");
-    }
-
-    return bar0;
-}
-
-class Device
-{
-    int fd;
-    uint8_t *bar0;
-    uint8_t *bar2;
-public:
-    Device(const std::string& chardev_path)
-        : fd(open(chardev_path.c_str(), O_RDWR | O_CLOEXEC))
-        , bar0(map_bar0(fd, 1 << 29))
-        , bar2(map_bar2(fd, 1 << 20))
-    {
-    }
-
-    void map_for_dma(void* buffer, size_t size, uint64_t noc_addr)
-    {
-        tenstorrent_pin_pages pin{};
-        pin.in.output_size_bytes = sizeof(pin.out);
-        pin.in.virtual_address = reinterpret_cast<uint64_t>(buffer);
-        pin.in.size = size;
-
-        if (ioctl(fd, TENSTORRENT_IOCTL_PIN_PAGES, &pin) != 0) {
-            throw std::system_error(errno, std::generic_category(), "Failed to pin pages");
-        }
-
-        uint64_t iova = pin.out.physical_address;
-        // TODO: configure iATU, ugh.
-
-        configure_iatu(0, (size - 1), noc_addr, iova);
-    }
-
-    void unmap_for_dma(void *buffer)
-    {
-        tenstorrent_unpin_pages unpin{};
-        unpin.in.virtual_address = reinterpret_cast<uintptr_t>(buffer);
-
-        if (ioctl(fd, TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin) != 0) {
-            throw std::system_error(errno, std::generic_category(), "Failed to unpin pages");
-        }
-    }
-
-    ~Device()
-    {
-        close(fd);
-    }
-
-private:
-    void bar0_write32(uint64_t offset, uint32_t value)
-    {
-        *reinterpret_cast<volatile uint32_t*>(bar0 + offset) = value;
-    }
-
-    void bar2_write32(uint64_t offset, uint32_t value)
-    {
-        *reinterpret_cast<volatile uint32_t*>(bar2 + offset) = value;
-    }
-
-    void configure_iatu(uint32_t region, uint32_t limit, uint64_t chip_address, uint64_t bus_address)
-    {
-#if GEEZ_PUT_THIS_IN_THE_DRIVER_ALREADY
-        auto write_iatu_reg = [&](uint32_t addr, uint32_t val) {
-            bar2_write32(0x1200 + addr, val);
-        };
-
-        //uint64_t regs = 0x300000 + (0x200 * region);
-        uint64_t regs = (0x200 * region);
-
-        uint32_t ctrl1 = 0x00000000;
-        uint32_t crtl2 = limit == 0 ? 0 : 0x88280000;
-        uint32_t lower_base = chip_address & 0xFFFFFFFF;
-        uint32_t upper_base = (chip_address >> 32) & 0xFFFFFFFF;
-        limit = limit == 0 ? 0x0 : limit - 1;
-        uint32_t lower_target = bus_address & 0xFFFFFFFF;
-        uint32_t upper_target = (bus_address >> 32) & 0xFFFFFFFF;
-
-        write_iatu_reg(regs + 0x00, ctrl1);
-        write_iatu_reg(regs + 0x04, crtl2);
-        write_iatu_reg(regs + 0x08, lower_base);
-        write_iatu_reg(regs + 0x0C, upper_base);
-        write_iatu_reg(regs + 0x10, limit);
-        write_iatu_reg(regs + 0x14, lower_target);
-        write_iatu_reg(regs + 0x18, upper_target);
-#endif
-    }
-
-};
-
-class DmaBuffer
-{
-    Device& device;
-    size_t size;
-    void* buffer;
-    uint64_t iova;
-
-public:
-    DmaBuffer(Device& device, size_t size, uint64_t iova)
-        : device(device)
-        , size(size)
-        , buffer(std::aligned_alloc(0x1000, size))
-        , iova(0)
-    {
-        if (!buffer) {
-            throw std::bad_alloc();
-        }
-
-        try {
-            device.map_for_dma(buffer, size, iova);
-        } catch (...) {
-            std::free(buffer);
-            throw;
-        }
-    }
-
-    uint8_t* data() { return static_cast<uint8_t*>(buffer); }
-    size_t length() const { return size; }
-
-    ~DmaBuffer() noexcept
-    {
-        try {
-            device.unmap_for_dma(buffer);
-            std::free(buffer);
-        } catch (...) {
-        }
-    }
-};
-} // namespace pci
 
 namespace detail {
 
