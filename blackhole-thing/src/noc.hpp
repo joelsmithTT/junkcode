@@ -502,7 +502,7 @@ public:
         window->read_block(0, data, size);
     }
 
-    std::unique_ptr<TlbWindow> map_tlb_1M(uint32_t x, uint32_t y, uint64_t address)
+    std::unique_ptr<TlbWindow> map_tlb_1M(uint32_t x, uint32_t y, uint64_t address, int noc = 0)
     {
         static constexpr uint64_t WINDOW_SIZE = 1 << 20;
         static constexpr uint64_t WINDOW_MASK = WINDOW_SIZE - 1;
@@ -511,6 +511,7 @@ public:
             .addr = address & ~WINDOW_MASK,
             .x_end = x,
             .y_end = y,
+            .noc = (uint8_t)noc,
         };
 
         auto handle = std::make_unique<TlbHandle>(fd, WINDOW_SIZE, config);
@@ -529,6 +530,25 @@ public:
             .addr = address & ~WINDOW_MASK,
             .x_end = x,
             .y_end = y,
+        };
+
+        auto handle = std::make_unique<TlbHandle>(fd, WINDOW_SIZE, config);
+        auto offset = address & WINDOW_MASK;
+        return offset ?
+            std::make_unique<OffsetTlbWindow>(std::move(handle), offset) :
+            std::make_unique<TlbWindow>(std::move(handle));
+    }
+
+    std::unique_ptr<TlbWindow> map_tlb_16M(uint32_t x, uint32_t y, uint64_t address, int noc = 0)
+    {
+        static constexpr uint64_t WINDOW_SIZE = 1 << 24;
+        static constexpr uint64_t WINDOW_MASK = WINDOW_SIZE - 1;
+
+        tenstorrent_noc_tlb_config config{
+            .addr = address & ~WINDOW_MASK,
+            .x_end = x,
+            .y_end = y,
+            .noc = (uint8_t)noc,
         };
 
         auto handle = std::make_unique<TlbHandle>(fd, WINDOW_SIZE, config);

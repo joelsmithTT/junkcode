@@ -273,8 +273,11 @@ struct tenstorrent_configure_tlb {
 	struct tenstorrent_configure_tlb_out out;
 };
 
+#define TENSTORRENT_DMA_D2H 0	// device to host
+#define TENSTORRENT_DMA_H2D 1	// host to device
 struct tenstorrent_dma_in {
 	__u32 tlb_id;
+	__u32 flags;
 	__u64 offset;	// offset within the TLB window
 	__u64 iova;		// IO virtual address of host buffer
 	__u64 size;		// bytes
