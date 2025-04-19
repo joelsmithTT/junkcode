@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(blackhole-thing)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CXX_STANDARD 20)
 
 find_package(Threads REQUIRED)
 
@@ -29,6 +28,8 @@ target_link_libraries(memory_for_x280 blackhole_thing)
 add_executable(x280-net x280-net.cpp)
 target_link_libraries(x280-net blackhole_thing)
 
-add_executable(wormhole-dma-thing wormhole-dma-thing.cpp)
-target_link_libraries(wormhole-dma-thing blackhole_thing)
+# add_executable(wormhole-dma-thing wormhole-dma-thing.cpp)
+# target_link_libraries(wormhole-dma-thing blackhole_thing)
 
+add_executable(wormhole-iatu-test wormhole-iatu-test.cpp)
+target_link_libraries(wormhole-iatu-test blackhole_thing)

@@ -253,14 +253,14 @@ public:
                 throw std::system_error(errno, std::generic_category(), "Failed to map TLB");
             }
 
-            void *wc = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, allocate_tlb.out.mmap_offset_wc);
-            if (wc == MAP_FAILED) {
-                munmap(uc, size);
-                throw std::system_error(errno, std::generic_category(), "Failed to map TLB");
-            }
+            // void *wc = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, allocate_tlb.out.mmap_offset_wc);
+            // if (wc == MAP_FAILED) {
+            //     // munmap(uc, size);
+            //     throw std::system_error(errno, std::generic_category(), "Failed to map TLB");
+            // }
 
             tlb_base_uc = reinterpret_cast<uint8_t *>(uc);
-            tlb_base_wc = reinterpret_cast<uint8_t *>(wc);
+            // tlb_base_wc = reinterpret_cast<uint8_t *>(wc);
         } catch (...) {
             free_tlb();
             close(fd);
@@ -271,7 +271,7 @@ public:
     ~TlbHandle() noexcept
     {
         munmap(tlb_base_uc, tlb_size);
-        munmap(tlb_base_wc, tlb_size);
+        // munmap(tlb_base_wc, tlb_size);
         free_tlb();
         close(fd);
     }
@@ -326,35 +326,35 @@ public:
     }
 
     // Memory access with selectable caching
-    void write32(uint64_t offset, uint32_t value, CacheMode mode = CacheMode::WC)
+    void write32(uint64_t offset, uint32_t value)
     {
         validate(offset, sizeof(uint32_t));
-        *reinterpret_cast<volatile uint32_t*>(base(mode) + offset) = value;
+        *reinterpret_cast<volatile uint32_t*>(base() + offset) = value;
     }
 
-    uint32_t read32(uint64_t offset, CacheMode mode = CacheMode::WC)
+    uint32_t read32(uint64_t offset)
     {
         validate(offset, sizeof(uint32_t));
-        return *reinterpret_cast<volatile uint32_t*>(base(mode) + offset);
+        return *reinterpret_cast<volatile uint32_t*>(base() + offset);
     }
 
     // Register access (always 32-bit, always uncached)
     void write_register(uint64_t offset, uint32_t value)
     {
-        write32(offset, value, CacheMode::UC);
+        write32(offset, value);
     }
 
     uint32_t read_register(uint64_t offset)
     {
-        return read32(offset, CacheMode::UC);
+        return read32(offset);
     }
 
     // Block transfers are limited to 32-bit aligned sizes.
-    virtual void write_block(uint64_t offset, const void* data, size_t size, CacheMode mode = CacheMode::WC)
+    virtual void write_block(uint64_t offset, const void* data, size_t size)
     {
         size_t n = size / sizeof(uint32_t);
         auto* src = static_cast<const uint32_t*>(data);
-        auto* dst = reinterpret_cast<volatile uint32_t*>(base(mode) + offset);
+        auto* dst = reinterpret_cast<volatile uint32_t*>(base() + offset);
 
         validate(offset, size);
 
@@ -363,10 +363,10 @@ public:
         }
     }
 
-    virtual void read_block(uint64_t offset, void* data, size_t size, CacheMode mode = CacheMode::UC)
+    virtual void read_block(uint64_t offset, void* data, size_t size)
     {
         size_t n = size / sizeof(uint32_t);
-        auto* src = reinterpret_cast<const volatile uint32_t*>(base(mode) + offset);
+        auto* src = reinterpret_cast<const volatile uint32_t*>(base() + offset);
         auto* dst = static_cast<uint32_t*>(data);
 
         validate(offset, size);
@@ -381,9 +381,9 @@ public:
     virtual size_t get_size() const { return handle->get_size(); }
 
 protected:
-    inline virtual uint8_t* base(CacheMode mode)
+    inline virtual uint8_t* base()
     {
-        return (mode == CacheMode::UC ? handle->get_base_uc() : handle->get_base_wc());
+        return handle->get_base_uc();
     }
 
 private:
@@ -422,9 +422,9 @@ public:
     }
 
 protected:
-    inline uint8_t* base(CacheMode mode) override
+    inline uint8_t* base() override
     {
-        return TlbWindow::base(mode) + base_offset;
+        return TlbWindow::base() + base_offset;
     }
 };
 
